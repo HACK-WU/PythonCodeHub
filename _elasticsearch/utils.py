@@ -20,7 +20,7 @@ def escape_query_string(query_string: str | list, many=False) -> str | list:
     :param query_string: 需要转义的查询字符串
     :return: 转义后的查询字符串
     """
-    if many and not isinstance(query_string, list):
+    if many is True and not isinstance(query_string, list):
         query_string = [query_string]
 
     regex = r'([+\-=&|><!(){}[\]^"~*?\\:\/ ])'
