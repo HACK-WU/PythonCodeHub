@@ -1,6 +1,6 @@
 import unittest
 
-from _elasticsearch.utils import escape_query_string
+from ab_elasticsearch.utils import escape_query_string
 
 
 class TestEscapeQueryString(unittest.TestCase):
