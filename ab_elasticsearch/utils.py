@@ -17,6 +17,7 @@ def escape_query_string(query_string: str | list, many=False) -> str | list:
         >>> escape_query_string("hello world =")
         'hello\\ world\\ \\='
 
+    :param many: 是否批量转义
     :param query_string: 需要转义的查询字符串
     :return: 转义后的查询字符串
     """
