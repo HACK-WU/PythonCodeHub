@@ -3,33 +3,42 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
 
+# from typing import Any,Optional,Union,Callable,Type,List
+# from typing import Any,Optional,Union,Callable,Type,List
 import requests
 from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
 from urllib3.util.retry import Retry
 
 # 配置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
 
 class APIClientError(Exception):
     """自定义 API 客户端异常基类"""
 
+
 class APIClientHTTPError(APIClientError):
     """表示 HTTP 错误响应的异常"""
+
     def __init__(self, message, response: requests.Response | None = None):
         super().__init__(message)
         self.response = response
         self.status_code = response.status_code if response else None
 
+
 class APIClientNetworkError(APIClientError):
     """表示网络问题导致的异常"""
+
 
 class APIClientTimeoutError(APIClientError):
     """表示请求超时的异常"""
 
+
 class APIClientValidationError(APIClientError):
     """表示输入验证失败的异常"""
+
 
 # --- 新增：定义异常处理器基类 ---
 class BaseExceptionHandler:
@@ -37,7 +46,10 @@ class BaseExceptionHandler:
     异常处理器基类，定义处理特定异常或状态码的接口。
     子类应实现 handle 方法。
     """
-    def handle(self, client_instance: 'BaseClient', request_id: str, request_config: dict[str, Any], exception: Exception) -> None:
+
+    def handle(
+        self, client_instance: "BaseClient", request_id: str, request_config: dict[str, Any], exception: Exception
+    ) -> None:
         """
         处理捕获到的异常。此方法可以记录日志、修改请求配置后重试、
         转换异常类型或执行其他自定义逻辑。
@@ -51,52 +63,56 @@ class BaseExceptionHandler:
         """
         raise NotImplementedError("Subclasses must implement the 'handle' method.")
 
-# --- 新增：实现一个示例异常处理器 ---
+
 class DefaultExceptionHandler(BaseExceptionHandler):
-    """一个默认的异常处理器示例，可以根据状态码进行不同处理"""
+    """示例：根据状态码决定是记录日志还是抑制异常"""
     def __init__(self, handled_status_codes: list[int] | None = None, log_only_status_codes: list[int] | None = None):
-        """
-        :param handled_status_codes: 一组状态码，如果匹配则记录警告日志并抑制异常。
-        :param log_only_status_codes: 一组状态码，如果匹配则记录警告日志但不抑制异常。
-        """
         self.handled_status_codes = handled_status_codes or []
         self.log_only_status_codes = log_only_status_codes or []
 
     def handle(self, client_instance: 'BaseClient', request_id: str, request_config: dict[str, Any], exception: Exception) -> None:
-        """
-        处理异常。
-        """
         url = f"{client_instance.base_url}/{request_config.get('endpoint', '').lstrip('/')}" if request_config.get('endpoint') else client_instance.base_url
 
-        # 处理 HTTP 错误
         if isinstance(exception, requests.exceptions.HTTPError):
             status_code = exception.response.status_code if exception.response else 0
             if status_code in self.handled_status_codes:
-                logger.warning(f"[{request_id}] Handled HTTP {status_code} for {url}. Suppressing exception.")
-                return # 抑制异常
+                logger.info(f"[{request_id}] Handler suppressed HTTP {status_code} for {url}.")
+                # 正常返回表示已处理
+                return
             elif status_code in self.log_only_status_codes:
-                logger.warning(f"[{request_id}] Logged HTTP {status_code} for {url}. Re-raising exception.")
-                # 不返回，继续传播异常
+                logger.warning(f"[{request_id}] Handler logged HTTP {status_code} for {url}. Exception will be re-raised.")
+                # 不返回，让调用者决定是否继续
 
-        # 处理超时
-        # elif isinstance(exception, requests.exceptions.Timeout):
-        #     logger.warning(f"[{request_id}] Request to {url} timed out. Handling...")
-        #     # 可以在这里实现重试逻辑等
+        # 对于未处理的情况，可以选择抛出原始异常或让它正常返回（如果调用者逻辑允许）
+        # 这里我们选择不主动抛出，让调用 _resolve_exception_handler 的逻辑决定是否继续下一个处理器
+        logger.debug(f"[{request_id}] DefaultExceptionHandler did not suppress the exception for {url}.")
 
-        # 处理其他网络错误
-        # elif isinstance(exception, requests.exceptions.RequestException):
-        #     logger.warning(f"[{request_id}] Network error for {url}: {exception}. Handling...")
-        #     # 可以在这里实现特定逻辑
+class RetryOnSpecificError(BaseExceptionHandler):
+    """示例：对特定错误尝试重试逻辑（简化版，实际可能需要更复杂的状态管理）"""
+    def __init__(self, retryable_status_codes: list[int] | None = None, max_retries: int = 1):
+        self.retryable_status_codes = retryable_status_codes or [502, 503, 504]
+        self.max_retries = max_retries
 
-        # 如果没有特定处理，或者需要传播，则不执行任何操作，让原始异常继续传播
-        logger.debug(f"[{request_id}] Exception handler did not suppress the exception for {url}.")
-
+    def handle(self, client_instance: 'BaseClient', request_id: str, request_config: dict[str, Any], exception: Exception) -> None:
+        # 注意：在当前同步 _make_request 结构中直接重试比较复杂且可能阻塞。
+        # 更好的做法可能是在更高层（如 request 方法）或异步执行器中处理重试。
+        # 这里仅作概念演示：记录日志并表明希望重试（但实际不执行）。
+        if isinstance(exception, requests.exceptions.HTTPError):
+            status_code = exception.response.status_code if exception.response else 0
+            if status_code in self.retryable_status_codes:
+                logger.info(f"[{request_id}] RetryOnSpecificError: Detected retryable status {status_code}. "
+                            f"In a full implementation, this would trigger a retry (max {self.max_retries}).")
+                # 在当前结构下，我们可以通过不抑制异常来表明需要（在上层）处理重试或失败。
+                # 或者，如果这个处理器认为它“处理”了（例如，记录了重试意图），它可以正常返回。
+                # 这取决于具体的设计意图。这里我们选择不抑制，让调用者决定。
+        # 对于其他异常，不处理，正常返回让调用者决定
 # --- 新增：定义异步执行器基类 ---
 class BaseAsyncExecutor:
     """
     异步执行器基类，定义执行多个请求的接口。
     子类应实现 execute 方法。
     """
+
     def __init__(self, max_workers: int | None = None, **kwargs):
         """
         初始化执行器。
@@ -106,7 +122,9 @@ class BaseAsyncExecutor:
         self.max_workers = max_workers
         self.executor_kwargs = kwargs
 
-    def execute(self, client_instance: 'BaseClient', request_list: list[dict[str, Any]]) -> list[requests.Response | Exception]:
+    def execute(
+        self, client_instance: "BaseClient", request_list: list[dict[str, Any]]
+    ) -> list[requests.Response | Exception]:
         """
         执行多个请求。
         :param client_instance: 调用此执行器的 BaseClient 实例。
@@ -115,12 +133,16 @@ class BaseAsyncExecutor:
         """
         raise NotImplementedError("Subclasses must implement the 'execute' method.")
 
+
 # --- 新增：实现一个基于 ThreadPoolExecutor 的异步执行器 ---
 class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
     """
     使用 ThreadPoolExecutor 实现异步请求的执行器。
     """
-    def execute(self, client_instance: 'BaseClient', request_list: list[dict[str, Any]]) -> list[requests.Response | Exception]:
+
+    def execute(
+        self, client_instance: "BaseClient", request_list: list[dict[str, Any]]
+    ) -> list[requests.Response | Exception]:
         """异步执行多个请求"""
         logger.info(f"Starting {len(request_list)} asynchronous requests with {self.max_workers} workers")
         responses: list[requests.Response | Exception | None] = [None] * len(request_list)
@@ -130,7 +152,7 @@ class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
         with ThreadPoolExecutor(max_workers=executor_max_workers, **self.executor_kwargs) as executor:
             # 提交所有任务
             for i, config in enumerate(request_list):
-                request_id = f"ASYNC-{i+1}-{uuid.uuid4().hex[:4]}"
+                request_id = f"ASYNC-{i + 1}-{uuid.uuid4().hex[:4]}"
                 # 直接传递 _make_request 方法和参数
                 future = executor.submit(client_instance._make_request, request_id, config)
                 futures[future] = i
@@ -144,72 +166,56 @@ class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
                     logger.error(f"Async request failed: {e}")
                     responses[index] = e
         # 确保返回列表类型匹配
-        return responses # type: ignore
+        return responses  # type: ignore
+
 
 class BaseClient:
     """
     API 客户端基类，定义通用接口和配置。
     子类应定义 base_url, 可选 endpoint 和 method。
     """
+
     base_url: str = ""  # 必须在子类中定义
     endpoint: str = ""  # 子路径，可选
-    method: str = "GET" # 默认方法
+    method: str = "GET"  # 默认方法
     default_timeout: int = 30
     default_retries: int = 3
     default_headers: dict[str, str] = {}
     max_workers: int = 10  # 异步请求最大线程数
     authentication_class: type[AuthBase] | AuthBase | None = None  # 认证类或实例
     # --- 新增：定义异步执行器类或实例 ---
-    executor_class: type[BaseAsyncExecutor] | BaseAsyncExecutor | None = ThreadPoolAsyncExecutor # 默认使用线程池
+    executor_class: type[BaseAsyncExecutor] | BaseAsyncExecutor | None = ThreadPoolAsyncExecutor  # 默认使用线程池
     # --- 新增：定义异常处理器类或实例 ---
-    exception_handler_class: type[BaseExceptionHandler] | BaseExceptionHandler | None = None # 默认不处理
+    exception_handler_class: type[BaseExceptionHandler] | BaseExceptionHandler | list[type[BaseExceptionHandler] | BaseExceptionHandler] | None = None
 
-    def __init__(self, default_headers: dict[str, str] | None = None,
-                 timeout: int | None = None, retries: int | None = None,
-                 max_workers: int | None = None,
-                 authentication: AuthBase | type[AuthBase] | None = None,
-                 executor: BaseAsyncExecutor | type[BaseAsyncExecutor] | None = None, # --- 新增：executor 参数 ---
-                 exception_handler: BaseExceptionHandler | type[BaseExceptionHandler] | None = None, # --- 新增：exception_handler 参数 ---
-                 **kwargs):
-        """
-        初始化客户端。
-        :param default_headers: 默认请求头
-        :param timeout: 超时时间 (秒)
-        :param retries: 重试次数
-        :param max_workers: 异步请求最大线程数
-        :param authentication: 认证类或实例，覆盖类属性
-        :param executor: 异步执行器类或实例，覆盖类属性 --- 新增 ---
-        :param exception_handler: 异常处理器类或实例，覆盖类属性 --- 新增 ---
-        :param kwargs: 其他传递给 requests.Session.request 的默认参数
-        """
-        # 确定 base_url (必须来自类属性)
-        self.base_url = getattr(self, 'base_url', "").rstrip('/')
+    def __init__(
+        self,
+        default_headers: dict[str, str] | None = None,
+        timeout: int | None = None,
+        retries: int | None = None,
+        max_workers: int | None = None,
+        authentication: AuthBase | type[AuthBase] | None = None,
+        executor: BaseAsyncExecutor | type[BaseAsyncExecutor] | None = None,
+        # --- 修改：exception_handler 参数类型 ---
+        exception_handler: BaseExceptionHandler | type[BaseExceptionHandler] | list[BaseExceptionHandler | type[BaseExceptionHandler]] | None = None,
+        **kwargs,
+    ):
+        """初始化客户端"""
+        self.base_url = getattr(self, "base_url", "").rstrip("/")
         if not self.base_url:
             raise APIClientValidationError("base_url must be provided as a class attribute.")
-        # 确定 endpoint 和 method (来自类属性)
-        self._class_default_endpoint = getattr(self, 'endpoint', "")
-        self._class_default_method = getattr(self, 'method', "GET").upper()
-        # 运行时配置
+        self._class_default_endpoint = getattr(self, "endpoint", "")
+        self._class_default_method = getattr(self, "method", "GET").upper()
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.retries = retries if retries is not None else self.default_retries
         if max_workers is not None:
             self.max_workers = max_workers
-        # 处理认证
         self.auth_instance = self._resolve_authentication(authentication)
-        # --- 新增：处理异步执行器 ---
         self.executor_instance = self._resolve_executor(executor)
-        # --- 新增：处理异常处理器 ---
-        self.exception_handler_instance = self._resolve_exception_handler(exception_handler)
-
-        # 合并类默认头、实例化时给的头和 kwargs 中可能的 headers
-        self.session_headers = {
-            **self.default_headers,
-            **(default_headers or {}),
-            **kwargs.pop('headers', {})  # 从 kwargs 中取出 headers
-        }
-        # 存储其他可能的默认 requests 参数
+        # --- 修改：解析异常处理器列表 ---
+        self.exception_handler_instances = self._resolve_exception_handler(exception_handler)
+        self.session_headers = {**self.default_headers, **(default_headers or {}), **kwargs.pop("headers", {})}
         self.default_request_kwargs = kwargs
-        # 创建并配置 Session
         self.session = self._create_session()
 
     def _resolve_authentication(self, authentication: AuthBase | type[AuthBase] | None) -> AuthBase | None:
@@ -223,7 +229,7 @@ class BaseClient:
             else:
                 raise APIClientValidationError("authentication must be an AuthBase subclass or instance")
         # 检查类属性
-        class_auth = getattr(self, 'authentication_class', None)
+        class_auth = getattr(self, "authentication_class", None)
         if class_auth is None:
             return None
         if isinstance(class_auth, type) and issubclass(class_auth, AuthBase):
@@ -246,11 +252,11 @@ class BaseClient:
             else:
                 raise APIClientValidationError("executor must be a BaseAsyncExecutor subclass or instance")
         # 检查类属性
-        class_executor = getattr(self, 'executor_class', None)
+        class_executor = getattr(self, "executor_class", None)
         if class_executor is None:
-             # 如果没有默认执行器类，可以返回默认实现的实例或抛出异常
-             # 这里我们实例化默认的 ThreadPoolAsyncExecutor
-             return ThreadPoolAsyncExecutor(max_workers=self.max_workers)
+            # 如果没有默认执行器类，可以返回默认实现的实例或抛出异常
+            # 这里我们实例化默认的 ThreadPoolAsyncExecutor
+            return ThreadPoolAsyncExecutor(max_workers=self.max_workers)
         if isinstance(class_executor, type) and issubclass(class_executor, BaseAsyncExecutor):
             # 实例化类属性定义的执行器类
             return class_executor(max_workers=self.max_workers)
@@ -260,29 +266,45 @@ class BaseClient:
             raise APIClientValidationError("executor_class must be a BaseAsyncExecutor subclass or instance")
 
     # --- 新增：解析异常处理器配置 ---
-    def _resolve_exception_handler(self, exception_handler: BaseExceptionHandler | type[BaseExceptionHandler] | None) -> BaseExceptionHandler | None:
-        """解析异常处理器配置，返回处理器实例"""
-        # 优先使用传入的处理器
-        if exception_handler is not None:
-            if isinstance(exception_handler, type) and issubclass(exception_handler, BaseExceptionHandler):
-                # 如果传入的是类，需要实例化。
-                return exception_handler() # 可以根据需要传递参数
-            elif isinstance(exception_handler, BaseExceptionHandler):
-                return exception_handler
-            else:
-                raise APIClientValidationError("exception_handler must be a BaseExceptionHandler subclass or instance")
-        # 检查类属性
-        class_exception_handler = getattr(self, 'exception_handler_class', None)
-        if class_exception_handler is None:
-            return None # 没有默认处理器
-        if isinstance(class_exception_handler, type) and issubclass(class_exception_handler, BaseExceptionHandler):
-            # 实例化类属性定义的处理器类
-            return class_exception_handler() # 可以根据需要传递参数
-        elif isinstance(class_exception_handler, BaseExceptionHandler):
-            return class_exception_handler
-        else:
-            raise APIClientValidationError("exception_handler_class must be a BaseExceptionHandler subclass or instance")
+    def _resolve_exception_handler(
+        self,
+        exception_handler: BaseExceptionHandler | type[BaseExceptionHandler] | list[BaseExceptionHandler | type[BaseExceptionHandler]] | None,
+    ) -> list[BaseExceptionHandler]:
+        """
+        解析异常处理器配置，返回处理器实例列表。
+        :param exception_handler: 传入的处理器配置（类、实例或列表）
+        :return: BaseExceptionHandler 实例列表
+        """
+        handlers_to_resolve = []
+        resolved_handlers = []
 
+        # 1. 确定要解析的处理器源：优先使用传入的，否则使用类属性
+        source = exception_handler if exception_handler is not None else getattr(self, "exception_handler_class", None)
+
+        # 2. 标准化为列表形式
+        if source is None:
+            return []  # 没有配置处理器
+        if not isinstance(source, list):
+            handlers_to_resolve = [source]  # 包装成列表
+        else:
+            handlers_to_resolve = source
+
+        # 3. 遍历列表，解析每个元素为实例
+        for handler in handlers_to_resolve:
+            if isinstance(handler, type) and issubclass(handler, BaseExceptionHandler):
+                try:
+                    # 尝试实例化，不带参数。如果需要参数，应传入实例。
+                    resolved_handlers.append(handler())
+                except Exception as e:
+                    logger.error(f"Failed to instantiate exception handler class {handler.__name__}: {e}")
+                    # 可以选择跳过或抛出错误，这里选择跳过
+            elif isinstance(handler, BaseExceptionHandler):
+                resolved_handlers.append(handler)
+            else:
+                logger.warning(f"Invalid exception handler item (skipped): {handler}")
+                # 可以选择抛出 APIClientValidationError
+
+        return resolved_handlers
 
     def _create_session(self) -> requests.Session:
         """创建并配置请求会话"""
@@ -298,7 +320,7 @@ class BaseClient:
                 backoff_factor=0.5,  # 增加退避因子
                 status_forcelist=[429, 500, 502, 503, 504],
                 allowed_methods=["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"],
-                raise_on_status=False
+                raise_on_status=False,
             )
             adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
             session.mount("http://", adapter)
@@ -308,16 +330,11 @@ class BaseClient:
     def _make_request(self, request_id: str, request_config: dict[str, Any]) -> requests.Response:
         """
         执行单个 HTTP 请求。
-        :param request_id: 请求唯一标识符
-        :param request_config: 请求配置字典
-        :return: requests.Response 对象
         """
-        # 从配置中提取参数，未提供则使用类默认值
+
         method = request_config.get('method', self._class_default_method).upper()
         endpoint = request_config.get('endpoint', self._class_default_endpoint)
-        # 构建完整 URL
         url = f"{self.base_url}/{endpoint.lstrip('/')}" if endpoint else self.base_url
-        # 合并默认请求参数和本次调用的参数
         request_kwargs = {
             **self.default_request_kwargs,
             **{k: v for k, v in request_config.items() if k not in ('method', 'endpoint')}
@@ -325,60 +342,58 @@ class BaseClient:
         logger.info(f"[{request_id}] Starting {method} request to {url}")
         logger.debug(f"[{request_id}] Request kwargs: {request_kwargs}")
         try:
-            # 使用 Session 发起请求
             response = self.session.request(
                 method=method,
                 url=url,
                 timeout=self.timeout,
                 **request_kwargs
             )
-            # 记录响应摘要信息
             logger.info(f"[{request_id}] Received {response.status_code} response")
             logger.debug(f"[{request_id}] Response headers: {response.headers}")
             response.raise_for_status()
             return response
-        except requests.exceptions.Timeout as e:
-            logger.error(f"[{request_id}] Request timed out: {e}")
-            # --- 新增：调用异常处理器 ---
-            if self.exception_handler_instance:
-                try:
-                    self.exception_handler_instance.handle(self, request_id, request_config, e)
-                except Exception as handler_exception:
-                    # 如果处理器本身抛出异常，则传播处理器异常
-                    logger.error(f"[{request_id}] Exception handler raised an error: {handler_exception}")
-                    raise handler_exception
-            # 如果处理器没有引发新异常或抑制原异常，则传播原始超时异常
-            raise APIClientTimeoutError(f"Request to {url} timed out after {self.timeout}s") from e
+        except requests.exceptions.RequestException as original_exception: # 捕获所有 requests 异常
+            # --- 修改：循环处理异常 ---
+            converted_exception: APIClientError # 用于存储最终可能抛出的转换后异常
+            if isinstance(original_exception, requests.exceptions.Timeout):
+                converted_exception = APIClientTimeoutError(f"Request to {url} timed out after {self.timeout}s")
+            elif isinstance(original_exception, requests.exceptions.HTTPError):
+                status_code = original_exception.response.status_codle if original_exception.response else 0
+                converted_exception = APIClientHTTPError(
+                    f"HTTP {status_code}: {original_exception.response.reason if original_exception.response else 'No response'}",
+                    response=original_exception.response
+                )
 
-        except requests.exceptions.HTTPError as e:
-            status_code = e.response.status_code if e.response else 0
-            logger.error(f"[{request_id}] HTTP error {status_code}: {e}")
-            # --- 新增：调用异常处理器 ---
-            if self.exception_handler_instance:
-                try:
-                    self.exception_handler_instance.handle(self, request_id, request_config, e)
-                except Exception as handler_exception:
-                    # 如果处理器本身抛出异常，则传播处理器异常
-                    logger.error(f"[{request_id}] Exception handler raised an error: {handler_exception}")
-                    raise handler_exception
-            # 如果处理器没有引发新异常或抑制原异常，则传播原始 HTTP 异常
-            raise APIClientHTTPError(
-                f"HTTP {status_code}: {e.response.reason if e.response else 'No response'}",
-                response=e.response
-            ) from e
+            else:
+                converted_exception = APIClientNetworkError(f"Request to {url} failed: {original_exception}")
 
-        except requests.exceptions.RequestException as e: # 捕获其他网络相关异常
-            logger.error(f"[{request_id}] Network error: {e}")
-            # --- 新增：调用异常处理器 ---
-            if self.exception_handler_instance:
-                try:
-                    self.exception_handler_instance.handle(self, request_id, request_config, e)
-                except Exception as handler_exception:
-                    # 如果处理器本身抛出异常，则传播处理器异常
-                    logger.error(f"[{request_id}] Exception handler raised an error: {handler_exception}")
-                    raise handler_exception
-            # 如果处理器没有引发新异常或抑制原异常，则传播原始网络异常
-            raise APIClientNetworkError(f"Request to {url} failed: {e}") from e
+            logger.error(f"[{request_id}] Request failed: {converted_exception}")
+
+            # 如果有配置的异常处理器，则尝试依次调用
+            if self.exception_handler_instances:
+                for i, handler_instance in enumerate(self.exception_handler_instances):
+                    try:
+                        logger.debug(f"[{request_id}] Trying exception handler {i+1}: {type(handler_instance).__name__}")
+                        handler_instance.handle(self, request_id, request_config, original_exception)
+                        # 如果 handle 正常返回，认为异常已被处理
+                        logger.info(f"[{request_id}] Exception handled successfully by {type(handler_instance).__name__}.")
+
+                        break # 处理器正常返回，认为已处理（至少介入），停止尝试其他处理器
+
+                    except (requests.exceptions.RequestException, APIClientError) as handler_raised_exception:
+                        # 如果处理器抛出原始异常或 API 客户端异常，视为未处理，继续下一个处理器
+                        # 区分是原始异常还是转换后的异常可能有用，但为简化，统一对待
+                        if handler_raised_exception is original_exception:
+                             logger.debug(f"[{request_id}] Handler {type(handler_instance).__name__} re-raised the original exception. Trying next handler.")
+                        else:
+                             logger.debug(f"[{request_id}] Handler {type(handler_instance).__name__} raised an APIClientError. Trying next handler.")
+                        continue # 继续循环，尝试下一个处理器
+
+                # 循环正常结束或 break 后，执行到这里
+                # 根据上面的逻辑，总是会抛出 converted_exception
+                # （除非在 break 后有特殊处理，但按标准语义，我们抛出）
+            # 如果没有配置处理器，或所有处理器都尝试过（没有 break），则抛出转换后的异常
+            raise converted_exception # 抛出最初转换的异常
 
     @property
     def full_url(self) -> str:
@@ -387,8 +402,9 @@ class BaseClient:
             return self.base_url
         return f"{self.base_url}/{self._class_default_endpoint.lstrip('/')}"
 
-    def request(self, request_data: dict[str, Any] | list[dict[str, Any]] | None = None,
-                is_async: bool = False) -> requests.Response | list[requests.Response | Exception]:
+    def request(
+        self, request_data: dict[str, Any] | list[dict[str, Any]] | None = None, is_async: bool = False
+    ) -> requests.Response | list[requests.Response | Exception]:
         """
         执行请求。
         :param request_data: 请求配置
@@ -423,7 +439,7 @@ class BaseClient:
         logger.info(f"Starting {len(request_list)} synchronous requests")
         responses = []
         for i, config in enumerate(request_list):
-            request_id = f"SYNC-{i+1}-{uuid.uuid4().hex[:4]}"
+            request_id = f"SYNC-{i + 1}-{uuid.uuid4().hex[:4]}"
             try:
                 response = self._make_request(request_id, config)
                 responses.append(response)
@@ -444,9 +460,11 @@ class BaseClient:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+
 # --- 具体实现 ---
 class PizzaAuth(AuthBase):
     """Pizza 认证示例"""
+
     def __init__(self, username):
         self.username = username
 
@@ -455,85 +473,147 @@ class PizzaAuth(AuthBase):
         r.headers["X-Pizza"] = self.username
         return r
 
+
 class BaiduClient(BaseClient):
     """用于访问百度的客户端基类"""
-    base_url = 'https://www.baidu.com'
+
+    base_url = "https://www.baidu.com"
     authentication_class = PizzaAuth("默认用户")  # 类级别认证
+
 
 class BaiduUser(BaiduClient):
     """用于访问百度用户的客户端"""
-    endpoint = '/user'
-    method = 'GET'
+
+    endpoint = "/user"
+    method = "GET"
+
 
 class BaiduUserDetail(BaiduUser):
     """用于访问百度用户详情的客户端"""
-    endpoint = '/detail'
-    method = 'GET'
+
+    endpoint = "/detail"
+    method = "GET"
+
 
 class HttpbinClient(BaseClient):
     """用于测试的 httpbin.org 客户端"""
-    base_url = 'https://httpbin.org'
+
+    base_url = "https://httpbin.org"
+
 
 # --- 使用示例：结合异常处理器 ---
+
 if __name__ == "__main__":
-    print("--- 9. 使用类级别异常处理器 (处理 404) ---")
-    class HttpbinClientWithHandler(HttpbinClient):
-        """使用自定义异常处理器的客户端"""
-        exception_handler_class = DefaultExceptionHandler(handled_status_codes=[404], log_only_status_codes=[500])
+    print("--- 9. 使用类级别异常处理器列表 ---")
+    # 定义一个组合处理器：先尝试抑制 404，再记录 500
+    class HttpbinClientWithHandlerList(HttpbinClient):
+        """使用异常处理器列表的客户端"""
+        # 处理器列表：先用 DefaultExceptionHandler 抑制 404，再用另一个实例记录 500
+        exception_handler_class = [
+            DefaultExceptionHandler(handled_status_codes=[404]), # 抑制 404
+            DefaultExceptionHandler(log_only_status_codes=[500]), # 记录 500
+            # 可以添加更多处理器
+        ]
 
-    httpbin_with_handler = HttpbinClientWithHandler()
+    httpbin_with_handler_list = HttpbinClientWithHandlerList()
 
+    print("  a. 测试 404 (应被第一个处理器抑制日志，但仍抛出异常):")
     try:
-        # 这个请求会返回 404，应该被处理器抑制
-        response = httpbin_with_handler.request(request_data={'endpoint': '/status/404', 'method': 'GET'})
-        print("Unexpected: Got a response for 404")
+        response = httpbin_with_handler_list.request(request_data={'endpoint': '/status/404', 'method': 'GET'})
+        print("    Unexpected: Got a response for 404")
     except APIClientHTTPError as e:
-        print(f"Expected: Got APIClientHTTPError for 404: {e}")
-    except Exception as e:
-         print(f"Unexpected exception type: {e}")
+        print(f"    Expected: Got APIClientHTTPError for 404: {e}. Note: Exception was processed (suppressed logging) but still raised.")
 
-    print("\n--- 10. 使用实例级别异常处理器覆盖 (处理 500) ---")
-    # 创建一个实例级别的处理器，只处理 500
-    instance_handler = DefaultExceptionHandler(handled_status_codes=[500])
-    httpbin_with_instance_handler = HttpbinClient(exception_handler=instance_handler) # 使用基类，实例级别覆盖
-
+    print("\n  b. 测试 500 (应被第二个处理器记录，但仍抛出异常):")
     try:
-        # 这个请求会返回 500，应该被实例处理器抑制
-        response = httpbin_with_instance_handler.request(request_data={'endpoint': '/status/500', 'method': 'GET'})
-        print("Unexpected: Got a response for 500")
+        response = httpbin_with_handler_list.request(request_data={'endpoint': '/status/500', 'method': 'GET'})
+        print("    Unexpected: Got a response for 500")
     except APIClientHTTPError as e:
-        print(f"Expected: Got APIClientHTTPError for 500: {e}")
-    except Exception as e:
-         print(f"Unexpected exception type: {e}")
+         print(f"    Expected: Got APIClientHTTPError for 500: {e}. Note: Exception was processed (logged) but still raised.")
 
+
+    print("\n--- 10. 使用实例级别异常处理器列表覆盖 ---")
+    # 创建一个实例级别的处理器列表，只处理 500 和超时
+    instance_handler_list = [
+        DefaultExceptionHandler(handled_status_codes=[500]), # 抑制 500
+        # 假设我们有一个处理超时的处理器
+        type('TimeoutHandler', (BaseExceptionHandler,), {
+            'handle': lambda self, client, rid, req, exc: (
+                logger.info(f"[{rid}] TimeoutHandler: Notifying for timeout.") if isinstance(exc, requests.exceptions.Timeout) else None
+            )
+        })()
+    ]
+    httpbin_with_instance_handler_list = HttpbinClient(exception_handler=instance_handler_list) # 基类，实例级别覆盖
+
+    print("  a. 测试 500 (应被实例列表的第一个处理器抑制):")
     try:
-        # 这个请求会返回 404，实例处理器不处理，应该抛出异常
-        response = httpbin_with_instance_handler.request(request_data={'endpoint': '/status/404', 'method': 'GET'})
-        print("Unexpected: Got a response for 404")
+        response = httpbin_with_instance_handler_list.request(request_data={'endpoint': '/status/500', 'method': 'GET'})
+        print("    Unexpected: Got a response for 500")
     except APIClientHTTPError as e:
-         print(f"Expected: Got APIClientHTTPError for 404 (not handled by instance handler): {e}")
-    except Exception as e:
-         print(f"Unexpected exception type: {e}")
+        print(f"    Expected: Got APIClientHTTPError for 500: {e}. Note: Exception was processed (suppressed) by instance handler.")
 
-    print("\n--- 11. 异步请求中使用异常处理器 ---")
-    httpbin_async_with_handler = HttpbinClientWithHandler() # 使用上面定义的带处理器的类
+    print("\n  b. 测试 404 (实例列表不处理，应直接抛出):")
     try:
-        responses = httpbin_async_with_handler.request(
+        response = httpbin_with_instance_handler_list.request(request_data={'endpoint': '/status/404', 'method': 'GET'})
+        print("    Unexpected: Got a response for 404")
+    except APIClientHTTPError as e:
+         print(f"    Expected: Got APIClientHTTPError for 404 (not handled by instance handler list): {e}")
+
+
+    print("\n--- 11. 异步请求中使用异常处理器列表 ---")
+    httpbin_async_with_handler_list = HttpbinClientWithHandlerList() # 使用上面定义的带处理器列表的类
+    try:
+        responses = httpbin_async_with_handler_list.request(
             request_data=[
                 {'endpoint': '/status/200', 'method': 'GET'},
-                {'endpoint': '/status/404', 'method': 'GET'}, # 应该被抑制
-                {'endpoint': '/status/500', 'method': 'GET'}  # 应该被记录但不抑制
+                {'endpoint': '/status/404', 'method': 'GET'}, # 应该被第一个处理器处理
+                {'endpoint': '/status/500', 'method': 'GET'}  # 应该被第二个处理器处理
             ],
             is_async=True
         )
-        print(f"Received {len(responses)} async responses (with handler):")
+        print(f"  Received {len(responses)} async responses (with handler list):")
         for i, res_or_exc in enumerate(responses):
             if isinstance(res_or_exc, requests.Response):
-                print(f"  Response {i+1}: Status {res_or_exc.status_code}")
+                print(f"    Response {i+1}: Status {res_or_exc.status_code}")
             elif isinstance(res_or_exc, APIClientError):
-                 # 500 应该在这里，因为只记录不抑制
-                 print(f"  Response {i+1}: Exception - {type(res_or_exc).__name__}: {res_or_exc}")
+                 print(f"    Response {i+1}: Exception - {type(res_or_exc).__name__}: {res_or_exc}")
             else:
-                 print(f"  Response {i+1}: Unexpected type {type(res_or_exc)}")
+                 print(f"    Response {i+1}: Unexpected type {type(res_or_exc)}")
     except APIClientError as e:
-        print(f"Async test with handler failed unexpectedly: {e}")
+        print(f"  Async test with handler list failed unexpectedly: {e}")
+
+    # --- 额外示例：展示处理器顺序和中断 ---
+    print("\n--- 12. 展示处理器列表顺序和中断 ---")
+    class FirstHandler(BaseExceptionHandler):
+        def handle(self, client_instance, request_id, request_config, exception):
+            print(f"    [{request_id}] FirstHandler: Called")
+            if isinstance(exception, requests.exceptions.HTTPError) and exception.response and exception.response.status_code == 418:
+                print(f"    [{request_id}] FirstHandler: I know how to handle 418, but I will raise the original exception to let the next handler try.")
+                raise exception # 抛出原异常，让下一个处理器处理
+            print(f"    [{request_id}] FirstHandler: I don't know how to handle this, raising a generic APIClientError to stop the chain.")
+            raise APIClientError("FirstHandler could not process") # 抛出 APIClientError，停止链
+
+    class SecondHandler(BaseExceptionHandler):
+        def handle(self, client_instance, request_id, request_config, exception):
+            print(f"    [{request_id}] SecondHandler: Called")
+            if isinstance(exception, requests.exceptions.HTTPError) and exception.response and exception.response.status_code == 418:
+                print(f"    [{request_id}] SecondHandler: I will handle 418. Logging and suppressing (by returning normally).")
+                # 正常返回，表示已处理，中断处理器链
+                return
+            print(f"    [{request_id}] SecondHandler: I don't handle this.")
+            raise exception # 或者 raise APIClientError("...")
+
+    class HttpClientForOrderTest(HttpbinClient):
+         exception_handler_class = [FirstHandler(), SecondHandler()]
+
+    order_test_client = HttpClientForOrderTest()
+    print("  a. 测试 418:")
+    try:
+        # httpbin /status/418 返回 418 I'm a teapot
+        response = order_test_client.request(request_data={'endpoint': '/status/418', 'method': 'GET'})
+        print("    Unexpected: Got a response for 418")
+    except APIClientHTTPError as e:
+        # 尽管 SecondHandler 正常返回，但根据当前 _make_request 实现，converted_exception 仍会被抛出
+        # 因为处理器正常返回只是中断了链，但不改变 _make_request 必须抛出的结果
+        print(f"    Got APIClientHTTPError for 418: {e}")
+        print("    (Note: SecondHandler handled it internally, but _make_request still reports the original failure)")
