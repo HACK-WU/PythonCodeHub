@@ -137,3 +137,10 @@ skip = "./.*,*.json,*.lock,ciphers/prehistoric_men.txt,project_euler/problem_022
 [tool.pytest.ini_options]
 testpaths = [ "tests/" ]
 python_files = [ "test_*.py", "tests.py" ]
+
+
+[[tool.uv.index]]
+# 配置清华源
+#url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true
