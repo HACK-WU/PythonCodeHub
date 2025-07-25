@@ -77,7 +77,6 @@ class BaseClient:
         authentication: AuthBase | type[AuthBase] | None = None,
         executor: BaseAsyncExecutor | type[BaseAsyncExecutor] | None = None,
         response_parser: BaseResponseParser | type[BaseResponseParser] | None = None,
-        # --- 新增：response_formatter 参数 ---
         response_formatter: BaseResponseFormatter | type[BaseResponseFormatter] | None = None,
         **kwargs,
     ):
@@ -153,7 +152,6 @@ class BaseClient:
             logger.warning(f"Invalid response parser item: {source}. Using RawResponseParser.")
             return RawResponseParser()
 
-    # --- 新增：解析响应格式化器配置 ---
     def _resolve_response_formatter(
         self, response_formatter: BaseResponseFormatter | type[BaseResponseFormatter] | None
     ) -> BaseResponseFormatter | None:
