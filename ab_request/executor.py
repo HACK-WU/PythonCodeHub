@@ -2,6 +2,7 @@ import base64
 import logging
 import pickle  # 用于序列化，但请注意安全性
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
@@ -308,3 +309,34 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
                 final_responses.append(APIClientError(f"Deserialization error for task result: {deser_e}"))
 
         return final_responses
+
+
+class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
+    """使用 ThreadPoolExecutor 实现异步请求的执行器。"""
+
+    def execute(
+        self, client_instance: "BaseClient", request_list: list[dict[str, Any]]
+    ) -> list[dict[str, Any] | Exception]:  # 返回类型改为格式化后的字典
+        """异步执行多个请求"""
+        logger.info(f"Starting {len(request_list)} asynchronous requests with {self.max_workers} workers")
+        results: list[dict[str, Any] | Exception | None] = [None] * len(request_list)  # 存储格式化后的数据
+        futures: dict[Future, int] = {}
+        executor_max_workers = self.max_workers if self.max_workers is not None else client_instance.max_workers
+        with ThreadPoolExecutor(max_workers=executor_max_workers, **self.executor_kwargs) as executor:
+            for i, config in enumerate(request_list):
+                request_id = f"ASYNC-{i + 1}-{uuid.uuid4().hex[:4]}"
+                # 直接传递 _make_request_and_format 方法和参数
+                future = executor.submit(client_instance._make_request_and_format, request_id, config)
+                futures[future] = i
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    result = future.result()  # 获取格式化后的数据
+                    results[index] = result
+                except APIClientError as e:  # 捕获未处理的客户端错误
+                    logger.error(f"Async request failed unexpectedly: {e}")
+                    results[index] = e  # 或者格式化这个错误?
+                except Exception as e:  # 捕获其他意外错误
+                    logger.error(f"Unexpected error in async request: {e}")
+                    results[index] = APIClientError(f"Unexpected error: {e}")  # 包装成客户端错误
+        return results  # type: ignore
