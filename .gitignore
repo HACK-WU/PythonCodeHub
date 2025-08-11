@@ -109,3 +109,4 @@ venv.bak/
 .vscode/
 .vs/
 bkcodeai.json
+uv.lock
