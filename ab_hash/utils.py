@@ -4,11 +4,12 @@ from typing import Any
 # 预处理基础类型（避免无效递归）
 _BASE_TYPES = (str, int, float, bool, type(None))
 
+
 def count_md5(
-        content: Any,
-        dict_sort: bool = True,
-        list_sort: bool = True,
-        _path_ids: tuple = None,
+    content: Any,
+    dict_sort: bool = True,
+    list_sort: bool = True,
+    _path_ids: tuple = None,
 ) -> str:
     """
     安全计算结构化数据的MD5哈希值，自动处理深度嵌套与循环引用
@@ -28,7 +29,7 @@ def count_md5(
     # 基础类型直接返回短路哈希
     if isinstance(content, _BASE_TYPES):
         # 增加空字符串隔离符，防'12'+'3' = '1'+'23'碰撞
-        return f"val:{str(content)}|"
+        return f"val:{content!s}|"
 
     # 初始化MD5哈希计算器
     hasher = hashlib.md5()
@@ -43,9 +44,7 @@ def count_md5(
             keys = sorted(content) if dict_sort else content.keys()
             for k in keys:
                 hasher.update(f"k:{k!s}|v:".encode())
-                hasher.update(
-                    count_md5(content[k], dict_sort, list_sort, _path_ids).encode()
-                )
+                hasher.update(count_md5(content[k], dict_sort, list_sort, _path_ids).encode())
 
         # 处理列表/元组/set类型数据
         elif isinstance(content, (list, tuple, set)):
@@ -75,7 +74,7 @@ def count_md5(
 
 
 def _stable_order_key(x: Any) -> str:
-    """ 优先用序列化安全方式生成排序键（覆盖 repr 的缺陷） """
+    """优先用序列化安全方式生成排序键（覆盖 repr 的缺陷）"""
     try:
         # 首选JSON-safe类型标准化
         if isinstance(x, (int, float, bool)):

@@ -1,13 +1,13 @@
-import requests
+import argparse
 import json
 import os
 import re
-import argparse
-import pandas as pd
-from urllib.parse import urljoin
 import time
 from datetime import datetime
+from urllib.parse import urljoin
 
+import pandas as pd
+import requests
 
 # 用于收集面板信息的全局列表
 panel_info_list = []
@@ -21,13 +21,13 @@ def extract_panels_info(dashboard_data, folder_name, dashboard_title, dashboard_
 
     def process_panel(panel, parent_title=None):
         """递归处理面板和子面板"""
-        if panel.get('type') == 'row':
-            for child in panel.get('panels', []):
-                process_panel(child, parent_title=panel.get('title'))
+        if panel.get("type") == "row":
+            for child in panel.get("panels", []):
+                process_panel(child, parent_title=panel.get("title"))
             return
 
         # 跳过行面板（row panel）和特殊类型
-        if panel.get('type') in ['header']:
+        if panel.get("type") in ["header"]:
             return
 
         # 提取面板基本信息
@@ -35,46 +35,49 @@ def extract_panels_info(dashboard_data, folder_name, dashboard_title, dashboard_
             "folder_name": folder_name,
             "dashboard_title": dashboard_title,
             "dashboard_uid": dashboard_uid,
-            "panel_id": panel.get('id'),
-            "panel_title": panel.get('title') or "无标题面板",
-            "panel_type": panel.get('type') or "未知类型",
-            "datasource": panel.get('datasource'),
-            "description": panel.get('description') or "",
+            "panel_id": panel.get("id"),
+            "panel_title": panel.get("title") or "无标题面板",
+            "panel_type": panel.get("type") or "未知类型",
+            "datasource": panel.get("datasource"),
+            "description": panel.get("description") or "",
             "parent_panel": parent_title,
             "has_data": "",  # 留空用于后续填写
             "migration_status": "",  # 留空用于后续填写
-            "notes": ""  # 留空用于备注
+            "notes": "",  # 留空用于备注
         }
 
         # 添加到全局列表
         panels.append(panel_info)
 
         # 处理子面板（如行内的面板）
-        for child in panel.get('panels', []):
-            process_panel(child, parent_title=panel.get('title'))
+        for child in panel.get("panels", []):
+            process_panel(child, parent_title=panel.get("title"))
 
     # 处理所有顶级面板
-    for panel in dashboard_data.get('panels', []):
+    for panel in dashboard_data.get("panels", []):
         process_panel(panel)
 
     # 处理模板变量（作为特殊面板）
-    for template in dashboard_data.get('templating', {}).get('list', []):
-        panels.append({
-            "folder_name": folder_name,
-            "dashboard_title": dashboard_title,
-            "dashboard_uid": dashboard_uid,
-            "panel_id": f"var_{template.get('name')}",
-            "panel_title": template.get('label') or template.get('name'),
-            "panel_type": "template_variable",
-            "datasource": "",
-            "description": template.get('description') or "",
-            "parent_panel": "",
-            "has_data": "",
-            "migration_status": "",
-            "notes": ""
-        })
+    for template in dashboard_data.get("templating", {}).get("list", []):
+        panels.append(
+            {
+                "folder_name": folder_name,
+                "dashboard_title": dashboard_title,
+                "dashboard_uid": dashboard_uid,
+                "panel_id": f"var_{template.get('name')}",
+                "panel_title": template.get("label") or template.get("name"),
+                "panel_type": "template_variable",
+                "datasource": "",
+                "description": template.get("description") or "",
+                "parent_panel": "",
+                "has_data": "",
+                "migration_status": "",
+                "notes": "",
+            }
+        )
 
     return panels
+
 
 def get_folders(api_url, api_key, api_cookie):
     """获取所有文件夹的ID和名称映射"""
@@ -85,7 +88,7 @@ def get_folders(api_url, api_key, api_cookie):
     }
 
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         folders = response.json()
         return {folder["title"]: folder["id"] for folder in folders}
@@ -98,13 +101,10 @@ def get_dashboards_in_folder(api_url, api_key, api_cookie, folder_id):
     """获取指定文件夹中的所有仪表盘UID"""
     url = urljoin(api_url, "api/search")
     headers = {"Authorization": f"Bearer {api_key}", "Cookie": api_cookie}
-    params = {
-        "type": "dash-db",
-        "folderIds": folder_id
-    }
+    params = {"type": "dash-db", "folderIds": folder_id}
 
     try:
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params, timeout=30)
         response.raise_for_status()
         dashboards = response.json()
         return [{"uid": db["uid"], "title": db["title"]} for db in dashboards]
@@ -113,7 +113,7 @@ def get_dashboards_in_folder(api_url, api_key, api_cookie, folder_id):
         return []
 
 
-def export_dashboard(api_url, api_key, api_cookie, dashboard_info, folder_name,  output_dir):
+def export_dashboard(api_url, api_key, api_cookie, dashboard_info, folder_name, output_dir):
     """导出单个仪表盘到JSON文件"""
     dashboard_uid = dashboard_info["uid"]
     dashboard_title = dashboard_info["title"]
@@ -122,7 +122,7 @@ def export_dashboard(api_url, api_key, api_cookie, dashboard_info, folder_name, 
     headers = {"Authorization": f"Bearer {api_key}", "Cookie": api_cookie}
 
     try:
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         dashboard_data = response.json()
 
@@ -139,12 +139,7 @@ def export_dashboard(api_url, api_key, api_cookie, dashboard_info, folder_name, 
         print(f"✅ 成功导出: {title} -> {file_path}")
 
         # 提取面板信息
-        panels = extract_panels_info(
-            dashboard_data["dashboard"],
-            folder_name,
-            dashboard_title,
-            dashboard_uid
-        )
+        panels = extract_panels_info(dashboard_data["dashboard"], folder_name, dashboard_title, dashboard_uid)
 
         # 添加到全局列表
         global panel_info_list
@@ -162,15 +157,12 @@ def generate_excel_report(panel_info_list, output_dir):
     def remove_illegal_chars(value):
         """移除字符串中的非法字符"""
         if isinstance(value, str):
-            return re.sub(r'[\x00-\x1F\x7F]', '', value)
+            return re.sub(r"[\x00-\x1F\x7F]", "", value)
         return value
 
     def clean_data(panel_info_list):
         """清理面板信息列表中的非法字符"""
-        return [
-            {key: remove_illegal_chars(value) for key, value in panel.items()}
-            for panel in panel_info_list
-        ]
+        return [{key: remove_illegal_chars(value) for key, value in panel.items()} for panel in panel_info_list]
 
     if not panel_info_list:
         print("⚠️ 没有面板信息可生成报告")
@@ -184,10 +176,18 @@ def generate_excel_report(panel_info_list, output_dir):
 
     # 重新排序列顺序
     column_order = [
-        "folder_name", "dashboard_title", "dashboard_uid",
-        "panel_id", "panel_title", "panel_type",
-        "datasource", "description", "parent_panel",
-        "has_data", "migration_status", "notes",
+        "folder_name",
+        "dashboard_title",
+        "dashboard_uid",
+        "panel_id",
+        "panel_title",
+        "panel_type",
+        "datasource",
+        "description",
+        "parent_panel",
+        "has_data",
+        "migration_status",
+        "notes",
     ]
     df = df[column_order]
 
@@ -196,27 +196,27 @@ def generate_excel_report(panel_info_list, output_dir):
     excel_path = os.path.join(output_dir, f"grafana_panels_report_{timestamp}.xlsx")
 
     # 保存Excel文件
-    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Panels Report')
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Panels Report")
 
         # 获取工作簿和工作表对象以设置列宽
         workbook = writer.book
-        worksheet = writer.sheets['Panels Report']
+        worksheet = writer.sheets["Panels Report"]
 
         # 设置列宽
         column_widths = {
-            'folder_name': 20,
-            'dashboard_title': 30,
-            'dashboard_uid': 15,
-            'panel_id': 10,
-            'panel_title': 30,
-            'panel_type': 15,
-            'datasource': 25,
-            'description': 40,
-            'parent_panel': 20,
-            'has_data': 15,
-            'migration_status': 20,
-            'notes': 40,
+            "folder_name": 20,
+            "dashboard_title": 30,
+            "dashboard_uid": 15,
+            "panel_id": 10,
+            "panel_title": 30,
+            "panel_type": 15,
+            "datasource": 25,
+            "description": 40,
+            "parent_panel": 20,
+            "has_data": 15,
+            "migration_status": 20,
+            "notes": 40,
         }
 
         for idx, col in enumerate(df.columns):
@@ -256,7 +256,7 @@ def export_dashboard_by_folder_name():
         script_dir = os.path.dirname(os.path.abspath(__file__))
         args.folders_file = os.path.join(script_dir, args.folders_file)
         try:
-            with open(args.folders_file, "r", encoding="utf-8") as f:
+            with open(args.folders_file, encoding="utf-8") as f:
                 target_folders = [line.strip() for line in f if line.strip()]
                 print(f"从文件 {args.folders_file} 读取 {len(target_folders)} 个文件夹")
         except Exception as e:
@@ -296,12 +296,7 @@ def export_dashboard_by_folder_name():
         total_panels = 0
         for dashboard in dashboards:
             success, panel_count = export_dashboard(
-                args.url,
-                args.key,
-                args.cookie,
-                dashboard,
-                folder_name,
-                folder_output
+                args.url, args.key, args.cookie, dashboard, folder_name, folder_output
             )
 
             if success:
