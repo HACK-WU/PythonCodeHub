@@ -15,6 +15,7 @@ dependencies = [
   "inflection>=0.5.1",
   "pandas>=2.3.1",
   "pytest>=8.4.1",
+  "redis==6",
   "requests>=2.32.4",
 ]
 
