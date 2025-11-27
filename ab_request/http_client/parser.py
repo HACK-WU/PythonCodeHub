@@ -1,3 +1,9 @@
+"""
+响应解析器模块
+
+提供多种响应解析器，支持 JSON、字节流、文件下载等不同的响应处理方式
+"""
+
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -5,7 +11,14 @@ from typing import Any
 
 import requests
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+from ab_request.http_client.constants import (
+    DEFAULT_CHUNK_SIZE,
+    DEFAULT_DOWNLOAD_PATH,
+    DEFAULT_FILENAME,
+    LOG_FORMAT,
+)
+
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 
@@ -56,12 +69,21 @@ class RawResponseParser(BaseResponseParser):
 
 
 class FileWriteResponseParser(BaseResponseParser):
-    """将响应内容写入文件"""
+    """
+    文件写入响应解析器
+
+    将响应内容以流式方式写入文件，适用于大文件下载
+
+    参数:
+        base_path: 文件保存的基础路径
+        chunk_size: 分块读取大小（字节）
+        default_filename: 默认文件名
+    """
 
     is_stream: bool = True
-    chunk_size: int = 8192
-    base_path: str = "./downloads"
-    default_filename = "downloaded_file"
+    chunk_size: int = DEFAULT_CHUNK_SIZE
+    base_path: str = DEFAULT_DOWNLOAD_PATH
+    default_filename = DEFAULT_FILENAME
     suffix: str = ""
 
     def __init__(self, base_path=None, chunk_size=None, default_filename=None):

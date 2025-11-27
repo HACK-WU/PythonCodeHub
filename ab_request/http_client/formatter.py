@@ -1,36 +1,20 @@
+"""
+响应格式化器模块
+
+提供响应格式化的基类和默认实现，用于将 HTTP 响应统一格式化为标准结构
+"""
+
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
 import requests
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+from ab_request.http_client.constants import LOG_FORMAT
+from ab_request.http_client.exceptions import APIClientError
+
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
-
-
-class APIClientError(Exception):
-    """自定义 API 客户端异常基类"""
-
-
-class APIClientHTTPError(APIClientError):
-    """表示 HTTP 错误响应的异常"""
-
-    def __init__(self, message, response: requests.Response | None = None):
-        super().__init__(message)
-        self.response = response
-        self.status_code = response.status_code if response else None
-
-
-class APIClientNetworkError(APIClientError):
-    """表示网络问题导致的异常"""
-
-
-class APIClientTimeoutError(APIClientError):
-    """表示请求超时的异常"""
-
-
-class APIClientValidationError(APIClientError):
-    """表示输入验证失败的异常"""
 
 
 class BaseResponseFormatter(ABC):

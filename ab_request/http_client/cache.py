@@ -1,3 +1,10 @@
+"""
+缓存管理模块
+
+提供多种缓存后端实现（内存缓存、Redis 缓存）和缓存客户端混入类
+支持灵活的缓存策略和用户级缓存隔离
+"""
+
 import abc
 import functools
 import hashlib
@@ -10,6 +17,18 @@ from typing import Any
 
 import redis
 
+from ab_request.http_client.constants import (
+    CACHEABLE_METHODS,
+    DEFAULT_CACHE_EXPIRE,
+    DEFAULT_CACHE_MAXSIZE,
+    LOG_FORMAT,
+    REDIS_DEFAULT_DB,
+    REDIS_DEFAULT_HOST,
+    REDIS_DEFAULT_PORT,
+    REDIS_MAX_CONNECTIONS,
+)
+
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 
@@ -34,9 +53,17 @@ class BaseCacheBackend(abc.ABC):
 
 
 class InMemoryCacheBackend(BaseCacheBackend):
-    """基于内存的缓存后端 (使用 LRU 策略)"""
+    """
+    基于内存的 LRU 缓存后端
 
-    def __init__(self, maxsize: int = 128):
+    使用 OrderedDict 实现 LRU（最近最少使用）缓存策略
+    支持过期时间和最大容量限制
+
+    参数:
+        maxsize: 缓存最大条目数
+    """
+
+    def __init__(self, maxsize: int = DEFAULT_CACHE_MAXSIZE):
         self.cache = OrderedDict()
         self.maxsize = maxsize
         self.lock = threading.RLock()
@@ -87,12 +114,37 @@ class InMemoryCacheBackend(BaseCacheBackend):
 
 
 class RedisCacheBackend(BaseCacheBackend):
-    """基于 Redis 的缓存后端 (优化版本)"""
+    """
+    基于 Redis 的缓存后端
 
-    def __init__(self, host="localhost", port=6379, db=0, password=None, **kwargs):
+    使用 Redis 作为分布式缓存存储，支持多进程/多服务器共享缓存
+    自动处理 JSON 序列化和连接池管理
+
+    参数:
+        host: Redis 服务器地址
+        port: Redis 服务器端口
+        db: Redis 数据库编号
+        password: Redis 密码（可选）
+        **kwargs: 其他 Redis 连接参数
+    """
+
+    def __init__(
+        self,
+        host=REDIS_DEFAULT_HOST,
+        port=REDIS_DEFAULT_PORT,
+        db=REDIS_DEFAULT_DB,
+        password=None,
+        **kwargs,
+    ):
         # 使用连接池提高性能
         self.pool = redis.ConnectionPool(
-            host=host, port=port, db=db, password=password, decode_responses=False, max_connections=10, **kwargs
+            host=host,
+            port=port,
+            db=db,
+            password=password,
+            decode_responses=False,
+            max_connections=REDIS_MAX_CONNECTIONS,
+            **kwargs,
         )
         self.client = redis.Redis(connection_pool=self.pool)
 
@@ -170,11 +222,25 @@ def _generate_cache_key(
 
 
 class CacheClientMixin:
-    """为 API 客户端提供缓存功能的"""
+    """
+    缓存客户端混入类
+
+    为 API 客户端提供透明的缓存功能，支持：
+    - 自动缓存 GET/HEAD 请求
+    - 用户级缓存隔离
+    - 灵活的缓存后端（内存/Redis）
+    - 缓存刷新和清除
+
+    类属性:
+        cache_backend_class: 缓存后端类
+        default_cache_expire: 默认缓存过期时间（秒）
+        cacheable_methods: 可缓存的 HTTP 方法集合
+        is_user_specific: 是否启用用户级缓存隔离
+    """
 
     cache_backend_class: type[BaseCacheBackend] = InMemoryCacheBackend
-    default_cache_expire: int | None = 300  # 5 minutes
-    cacheable_methods = {"GET", "HEAD"}  # 可缓存的方法
+    default_cache_expire: int | None = DEFAULT_CACHE_EXPIRE
+    cacheable_methods = CACHEABLE_METHODS
     is_user_specific: bool = False
 
     def __init__(

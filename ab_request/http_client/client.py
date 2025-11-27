@@ -1,6 +1,16 @@
-# Time: 2025/7/24 23:36
-# name: client.py
-# author: HACK-WU
+"""
+HTTP 客户端核心模块
+
+提供灵活、可扩展的 HTTP 客户端基类，支持：
+- 自定义认证机制
+- 多种响应解析器和格式化器
+- 同步/异步请求执行
+- 自动重试和连接池管理
+- 完善的错误处理
+
+作者: HACK-WU
+创建时间: 2025/7/24 23:36
+"""
 
 import logging
 import uuid
@@ -11,62 +21,69 @@ from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
 from urllib3.util.retry import Retry
 
-from ab_request.executor import BaseAsyncExecutor, ThreadPoolAsyncExecutor
-from ab_request.formatter import BaseResponseFormatter, DefaultResponseFormatter
-from ab_request.parser import (
+from ab_request.http_client.constants import (
+    DEFAULT_MAX_WORKERS,
+    DEFAULT_RETRIES,
+    DEFAULT_TIMEOUT,
+    LOG_FORMAT,
+    POOL_CONNECTIONS,
+    POOL_MAXSIZE,
+    RETRY_ALLOWED_METHODS,
+    RETRY_BACKOFF_FACTOR,
+    RETRY_STATUS_FORCELIST,
+)
+from ab_request.http_client.exceptions import (
+    APIClientError,
+    APIClientHTTPError,
+    APIClientNetworkError,
+    APIClientTimeoutError,
+    APIClientValidationError,
+)
+from ab_request.http_client.async_executor import BaseAsyncExecutor, ThreadPoolAsyncExecutor
+from ab_request.http_client.formatter import BaseResponseFormatter, DefaultResponseFormatter
+from ab_request.http_client.parser import (
     BaseResponseParser,
-    ContentResponseParser,
     FileWriteResponseParser,
     JSONResponseParser,
     RawResponseParser,
 )
 
 # 配置日志
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 
-class APIClientError(Exception):
-    """自定义 API 客户端异常基类"""
-
-
-class APIClientHTTPError(APIClientError):
-    """表示 HTTP 错误响应的异常"""
-
-    def __init__(self, message, response: requests.Response | None = None):
-        super().__init__(message)
-        self.response = response
-        self.status_code = response.status_code if response else None
-
-
-class APIClientNetworkError(APIClientError):
-    """表示网络问题导致的异常"""
-
-
-class APIClientTimeoutError(APIClientError):
-    """表示请求超时的异常"""
-
-
-class APIClientValidationError(APIClientError):
-    """表示输入验证失败的异常"""
-
-
 class BaseClient:
-    """API 客户端基类，定义通用接口和配置。"""
+    """
+    API 客户端基类
+
+    提供统一的 HTTP 请求接口和配置管理，支持高度定制化
+
+    类属性:
+        base_url: API 基础 URL（必须在子类中设置）
+        endpoint: 默认端点路径
+        method: 默认 HTTP 方法
+        default_timeout: 默认超时时间（秒）
+        default_retries: 默认重试次数
+        default_headers: 默认请求头
+        max_workers: 异步执行时的最大工作线程数
+        authentication_class: 认证类或实例
+        executor_class: 异步执行器类或实例
+        response_parser_class: 响应解析器类或实例
+        response_formatter_class: 响应格式化器类或实例
+    """
 
     base_url: str = ""
     endpoint: str = ""
     method: str = "GET"
-    default_timeout: int = 30
-    default_retries: int = 3
+    default_timeout: int = DEFAULT_TIMEOUT
+    default_retries: int = DEFAULT_RETRIES
     default_headers: dict[str, str] = {}
-    max_workers: int = 10
+    max_workers: int = DEFAULT_MAX_WORKERS
     authentication_class: type[AuthBase] | AuthBase | None = None
     executor_class: type[BaseAsyncExecutor] | BaseAsyncExecutor | None = ThreadPoolAsyncExecutor
     response_parser_class: type[BaseResponseParser] | BaseResponseParser | None = JSONResponseParser
-    response_formatter_class: type[BaseResponseFormatter] | BaseResponseFormatter | None = (
-        DefaultResponseFormatter  # 默认使用格式化器
-    )
+    response_formatter_class: type[BaseResponseFormatter] | BaseResponseFormatter | None = DefaultResponseFormatter
 
     def __init__(
         self,
@@ -189,12 +206,14 @@ class BaseClient:
         if self.retries > 0:
             retry_strategy = Retry(
                 total=self.retries,
-                backoff_factor=0.5,
-                status_forcelist=[429, 500, 502, 503, 504],
-                allowed_methods=["HEAD", "GET", "PUT", "DELETE", "OPTIONS", "TRACE", "POST"],
+                backoff_factor=RETRY_BACKOFF_FACTOR,
+                status_forcelist=RETRY_STATUS_FORCELIST,
+                allowed_methods=RETRY_ALLOWED_METHODS,
                 raise_on_status=False,
             )
-            adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=100, pool_maxsize=100)
+            adapter = HTTPAdapter(
+                max_retries=retry_strategy, pool_connections=POOL_CONNECTIONS, pool_maxsize=POOL_MAXSIZE
+            )
             session.mount("http://", adapter)
             session.mount("https://", adapter)
         return session
@@ -350,105 +369,3 @@ class BaseClient:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-
-
-class PizzaAuth(AuthBase):
-    """Pizza 认证示例"""
-
-    def __init__(self, username):
-        self.username = username
-
-    def __call__(self, r):
-        r.headers["X-Pizza"] = self.username
-        return r
-
-
-class BaiduClient(BaseClient):
-    """用于访问百度的客户端基类"""
-
-    base_url = "https://www.baidu.com"
-    authentication_class = PizzaAuth("默认用户")
-
-
-class BaiduUser(BaiduClient):
-    """用于访问百度用户的客户端"""
-
-    endpoint = "/user"
-    method = "GET"
-
-
-class BaiduUserDetail(BaiduUser):
-    """用于访问百度用户详情的客户端"""
-
-    endpoint = "/detail"
-    method = "GET"
-
-
-class HttpbinClient(BaseClient):
-    """用于测试的 httpbin.org 客户端"""
-
-    base_url = "https://httpbin.org"
-
-
-# --- 使用示例 ---
-if __name__ == "__main__":
-    print("--- 1. 默认行为 (返回格式化后的字典) ---")
-    client_default = HttpbinClient()
-    result = client_default.request({"endpoint": "/get", "params": {"key": "value"}})
-    print(f"  Formatted Result: {result}")
-
-    print("\n--- 2. 返回 JSON 数据并格式化 ---")
-    client_json = HttpbinClient(response_parser=JSONResponseParser())
-    json_result = client_json.request({"endpoint": "/get", "params": {"key": "value"}})
-    print(f"  Formatted JSON Result: {json_result}")
-
-    print("\n--- 3. 返回 Content 字节数据并格式化 ---")
-    client_content = HttpbinClient(response_parser=ContentResponseParser())
-    content_result = client_content.request({"endpoint": "/get", "params": {"key": "value"}})
-    print(
-        f"  Formatted Content Result (Data type): "
-        f"{type(content_result['data'])}, Length: {len(content_result['data']) if content_result['data'] else 0} bytes"
-    )
-
-    print("\n--- 4. 处理错误并格式化 ---")
-    client_error = HttpbinClient()
-    error_result = client_error.request({"endpoint": "/status/404", "method": "GET"})
-    print(f"  Formatted Error Result: {error_result}")
-
-    print("\n--- 5. 类级别设置 JSON 解析和默认格式化 ---")
-
-    class HttpbinJSONFormattedClient(HttpbinClient):
-        response_parser_class = JSONResponseParser
-        # response_formatter_class = DefaultResponseFormatter # 默认已设置
-
-    client_class_json = HttpbinJSONFormattedClient()
-    json_class_result = client_class_json.request({"endpoint": "/json"})
-    print(f"  Class-Level Formatted JSON Result: {json_class_result}")
-
-    print("\n--- 6. 异步请求返回格式化数据 ---")
-    client_async = HttpbinClient(response_parser=JSONResponseParser())
-    async_results = client_async.request(
-        [
-            {"endpoint": "/get", "params": {"id": 1}},
-            {"endpoint": "/status/404", "method": "GET"},
-            {"endpoint": "/uuid"},
-        ],
-        is_async=True,
-    )
-    print("  Async Formatted Results:")
-    for i, res in enumerate(async_results):
-        # 注意：异步执行器 execute 中已处理意外异常，这里主要是格式化后的 dict 或 Exception
-        if isinstance(res, dict):
-            print(f"    Async Result {i + 1}: {res}")
-        elif isinstance(res, Exception):
-            print(f"    Async Result {i + 1}: Exception - {type(res).__name__}: {res}")
-        else:
-            print(f"    Async Result {i + 1}: Unexpected type {type(res)}: {res}")
-
-    print("\n--- 7. 不使用格式化器 (直接返回原始响应/异常对象，但为了兼容性仍会格式化) ---")
-    # 通过传递 None 来禁用格式化器
-    client_no_format = HttpbinClient(response_formatter=None)
-    no_format_result = client_no_format.request({"endpoint": "/get", "params": {"key": "value"}})
-    print(f"  No Formatter Result (Fallback): {no_format_result}")
-    no_format_error_result = client_no_format.request({"endpoint": "/status/500", "method": "GET"})
-    print(f"  No Formatter Error Result (Fallback): {no_format_error_result}")
