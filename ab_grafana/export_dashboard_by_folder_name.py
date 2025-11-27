@@ -113,7 +113,9 @@ def get_dashboards_in_folder(api_url, api_key, api_cookie, folder_id):
         return []
 
 
-def export_dashboard(api_url, api_key, api_cookie, dashboard_info, folder_name, output_dir):
+def export_dashboard(
+    api_url, api_key, api_cookie, dashboard_info, folder_name, output_dir
+):
     """导出单个仪表盘到JSON文件"""
     dashboard_uid = dashboard_info["uid"]
     dashboard_title = dashboard_info["title"]
@@ -200,7 +202,6 @@ def generate_excel_report(panel_info_list, output_dir):
         df.to_excel(writer, index=False, sheet_name="Panels Report")
 
         # 获取工作簿和工作表对象以设置列宽
-        workbook = writer.book
         worksheet = writer.sheets["Panels Report"]
 
         # 设置列宽
@@ -220,7 +221,9 @@ def generate_excel_report(panel_info_list, output_dir):
         }
 
         for idx, col in enumerate(df.columns):
-            worksheet.column_dimensions[chr(65 + idx)].width = column_widths.get(col, 15)
+            worksheet.column_dimensions[chr(65 + idx)].width = column_widths.get(
+                col, 15
+            )
 
     print(f"📊 Excel报告已生成: {excel_path}")
     return excel_path
@@ -234,11 +237,17 @@ def export_dashboard_by_folder_name():
     用法二：python export_dashboard_by_folder_name.py --url https://xxxgrafana.com/grafana-xxx/ --key "xxxx" --cookie "xxxx" --folders "folder1" "folder2"
     """
     parser = argparse.ArgumentParser(description="批量导出Grafana文件夹中的仪表盘")
-    parser.add_argument("--url", required=True, help="Grafana基础URL (e.g. http://localhost:3000)")
+    parser.add_argument(
+        "--url", required=True, help="Grafana基础URL (e.g. http://localhost:3000)"
+    )
     parser.add_argument("--key", required=True, help="Grafana API密钥")
     parser.add_argument("--cookie", required=True, help="Grafana API的cookie值")
-    parser.add_argument("--folders", nargs="*", default=[], help="要导出的文件夹名称列表")
-    parser.add_argument("--folders-file", help="包含文件夹名称列表的文件路径（每行一个文件夹名称）")
+    parser.add_argument(
+        "--folders", nargs="*", default=[], help="要导出的文件夹名称列表"
+    )
+    parser.add_argument(
+        "--folders-file", help="包含文件夹名称列表的文件路径（每行一个文件夹名称）"
+    )
     parser.add_argument("--output", default="./grafana_export", help="输出目录路径")
 
     args = parser.parse_args()
@@ -284,7 +293,9 @@ def export_dashboard_by_folder_name():
         os.makedirs(folder_output, exist_ok=True)
 
         # 获取文件夹中的仪表盘
-        dashboards = get_dashboards_in_folder(args.url, args.key, args.cookie, folder_id)
+        dashboards = get_dashboards_in_folder(
+            args.url, args.key, args.cookie, folder_id
+        )
         if not dashboards:
             print(f"文件夹中没有仪表盘: {folder_name}")
             continue
