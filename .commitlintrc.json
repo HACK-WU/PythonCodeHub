@@ -4,9 +4,12 @@
     "type-enum": [
       2,
       "always",
-      ["feat", "fix", "docs", "style", "refactor", "test", "chore", "revert","release","merge"]
+      ["feat", "fix", "docs", "style", "refactor", "test", "chore", "revert","release","merge","perf","ci","build"]
     ],
-    "header-max-length": [2, "always", 72],
-    "type-empty": [2, "never"]
+    "header-max-length": [1, "always", 100],
+    "body-max-line-length": [1, "always", 200],
+    "type-empty": [2, "never"],
+    "subject-empty": [2, "never"],
+    "subject-case": [0]
   }
 }
