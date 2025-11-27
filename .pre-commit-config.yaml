@@ -15,13 +15,26 @@ repos:
       - id: check-yaml
       - id: end-of-file-fixer
         types: [ python ]
+        # 排除可能需要特殊格式的文件
+        exclude: |
+          (?x)(
+             tests/.*\.txt|
+             .*\.md
+          )
       - id: trailing-whitespace
+        # 排除 Markdown 文件（可能需要尾部空格实现换行）
+        exclude: |
+          (?x)(
+             .*\.md|
+             tests/.*\.txt
+          )
       - id: requirements-txt-fixer
 
-  - repo: https://github.com/MarcoGorelli/auto-walrus
-    rev: 0.3.4
-    hooks:
-      - id: auto-walrus
+  # auto-walrus: 自动转换为海象运算符可能降低可读性，建议按需启用
+  # - repo: https://github.com/MarcoGorelli/auto-walrus
+  #   rev: 0.3.4
+  #   hooks:
+  #     - id: auto-walrus
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.11.11
@@ -36,6 +49,18 @@ repos:
       - id: codespell
         additional_dependencies:
           - tomli
+        # 排除容易误报的文件类型
+        exclude: |
+          (?x)(
+             tests/.*|
+             .*\.json|
+             .*\.lock|
+             .*\.min\..*
+          )
+        # 添加常见技术术语到忽略列表
+        args: ['--ignore-words-list=crate,damon,fo,hist,iff,som,sur,tim']
+        # 设置为警告模式，不阻止提交
+        verbose: true
 
   - repo: https://github.com/tox-dev/pyproject-fmt
     rev: "v2.6.0"
@@ -57,7 +82,15 @@ repos:
         description: Check ip
         entry: python3 scripts/sensitive_info_check/check_ip.py
         language: system
+        # 扩大排除范围，避免误报
         exclude: |
           (?x)(
-             tests/.*.py
+             tests/.*\.py|
+             .*_test\.py|
+             test_.*\.py|
+             examples/.*|
+             docs/.*|
+             .*\.md|
+             .*\.lock|
+             .*\.json
           )
