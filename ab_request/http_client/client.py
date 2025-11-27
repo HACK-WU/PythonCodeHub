@@ -503,9 +503,10 @@ class BaseClient:
         执行步骤:
             1. 为 FileWriteResponseParser 设置文件名（如果需要）
             2. 执行 HTTP 请求，捕获响应或异常
-            3. 清理临时属性（finally 块）
-            4. 使用格式化器格式化响应或异常
-            5. 处理格式化失败的情况，返回降级响应
+            3. 解析响应数据（如果请求成功且配置了解析器）
+            4. 清理临时属性（finally 块）
+            5. 使用格式化器格式化响应或异常
+            6. 处理格式化失败的情况，返回降级响应
         """
         # 步骤1: 为 FileWriteResponseParser 传递文件名
         if self.response_parser_instance and isinstance(self.response_parser_instance, FileWriteResponseParser):
@@ -514,14 +515,27 @@ class BaseClient:
                 self.response_parser_instance._current_filename = filename_from_config
 
         # 步骤2: 执行请求并捕获响应或异常
-        response_or_exception: requests.Response | APIClientError
+        parsed_data: Any = None
+        parse_error: Exception | None = None
+
         try:
             response = self._make_request(request_id, request_config)
             response_or_exception = response
+
+            # 步骤3: 解析响应数据（仅在请求成功时）
+            if self.response_parser_instance:
+                try:
+                    logger.debug(f"[{request_id}] Parsing response data")
+                    parsed_data = self.response_parser_instance.parse(self, response)
+                    logger.debug(f"[{request_id}] Response data parsed successfully")
+                except Exception as e:
+                    # 捕获解析错误，但不立即抛出，交给格式化器处理
+                    parse_error = e
+                    logger.error(f"[{request_id}] Response parsing failed: {e}")
         except APIClientError as e:
             response_or_exception = e
         finally:
-            # 步骤3: 清理临时属性，避免状态污染
+            # 步骤4: 清理临时属性，避免状态污染
             if (
                 self.response_parser_instance
                 and isinstance(self.response_parser_instance, FileWriteResponseParser)
@@ -529,10 +543,12 @@ class BaseClient:
             ):
                 delattr(self.response_parser_instance, "_current_filename")
 
-        # 步骤4: 使用格式化器格式化结果
+        # 步骤5: 使用格式化器格式化结果
         if self.response_formatter_instance:
             try:
-                formatted_data = self.response_formatter_instance.format(self, response_or_exception, request_config)
+                formatted_data = self.response_formatter_instance.format(
+                    self, response_or_exception, request_config, parsed_data, parse_error
+                )
                 return formatted_data
             except Exception as format_error:
                 logger.error(f"[{request_id}] Response formatting failed: {format_error}")
@@ -544,13 +560,21 @@ class BaseClient:
                     "data": None,
                 }
 
-        # 步骤5: 未配置格式化器时的降级处理
+        # 步骤6: 未配置格式化器时的降级处理
         if isinstance(response_or_exception, requests.Response):
+            # 如果有解析错误，标记为失败
+            if parse_error:
+                return {
+                    "result": False,
+                    "code": response_or_exception.status_code,
+                    "message": f"Parsing failed: {parse_error}",
+                    "data": None,
+                }
             return {
                 "result": True,
                 "code": response_or_exception.status_code,
                 "message": "Success (No formatter)",
-                "data": response_or_exception,
+                "data": parsed_data if parsed_data is not None else response_or_exception,
             }
         else:  # APIClientError
             return {
