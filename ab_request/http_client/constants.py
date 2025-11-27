@@ -41,6 +41,20 @@ RETRY_ALLOWED_METHODS = [
 POOL_CONNECTIONS = 100  # 连接池大小
 POOL_MAXSIZE = 100  # 连接池最大连接数
 
+# 默认重试策略和连接池配置字典
+DEFAULT_RETRY_CONFIG = {
+    "total": DEFAULT_RETRIES,  # 重试总次数
+    "backoff_factor": RETRY_BACKOFF_FACTOR,  # 重试退避因子
+    "status_forcelist": RETRY_STATUS_FORCELIST,  # 需要重试的状态码列表
+    "allowed_methods": RETRY_ALLOWED_METHODS,  # 允许重试的HTTP方法
+    "raise_on_status": False,  # 不在重试时抛出状态异常
+}
+
+DEFAULT_POOL_CONFIG = {
+    "pool_connections": POOL_CONNECTIONS,  # 连接池大小
+    "pool_maxsize": POOL_MAXSIZE,  # 连接池最大连接数
+}
+
 # 文件下载配置
 DEFAULT_DOWNLOAD_PATH = "./downloads"  # 默认下载路径
 DEFAULT_CHUNK_SIZE = 8192  # 默认分块大小（字节）
@@ -54,3 +68,8 @@ REDIS_MAX_CONNECTIONS = 10
 
 # 日志格式
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# 响应格式化器状态码
+RESPONSE_CODE_NON_HTTP_ERROR = -1  # 非HTTP错误代码（如网络超时、连接失败等）
+RESPONSE_CODE_UNEXPECTED_TYPE = -2  # 未预期的响应/异常类型错误代码
+RESPONSE_CODE_FORMATTING_ERROR = -3  # 响应格式化失败错误代码

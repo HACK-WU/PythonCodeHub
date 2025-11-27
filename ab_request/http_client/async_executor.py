@@ -39,7 +39,11 @@ class BaseAsyncExecutor:
         self.max_workers = max_workers
         self.executor_kwargs = kwargs
 
-    def execute(self, client_instance, request_list: list[dict[str, Any]]) -> list[dict[str, Any] | Exception]:
+    def execute(
+        self,
+        client_instance: "BaseClient",  # noqa: F821
+        request_list: list[dict[str, Any]],
+    ) -> list[dict[str, Any] | Exception]:
         """
         执行多个请求
 
@@ -67,7 +71,7 @@ class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
         4. 自动处理异常，确保不会因单个请求失败而中断整体执行
     """
 
-    def execute(self, client_instance, request_list: list[dict[str, Any]]) -> list[dict[str, Any] | Exception]:
+    def execute(self, client_instance: "BaseClient", request_list: list[dict]) -> list[dict]:  # noqa: F821
         """
         使用线程池异步执行多个请求
 

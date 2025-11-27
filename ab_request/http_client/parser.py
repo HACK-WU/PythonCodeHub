@@ -29,7 +29,7 @@ class BaseResponseParser(ABC):
     is_stream: bool = False
 
     @abstractmethod
-    def parse(self, client_instance, response: requests.Response) -> Any:
+    def parse(self, client_instance: "BaseClient", response: requests.Response) -> Any:  # noqa: F821
         """解析 requests.Response 对象并返回所需格式的数据。"""
 
 
@@ -39,7 +39,7 @@ class JSONResponseParser(BaseResponseParser):
     # 设置 is_stream 为 False，因为需要完整读取响应体才能解析为 JSON
     is_stream: bool = False
 
-    def parse(self, client_instance, response: requests.Response) -> Any:  # noqa: ARG002
+    def parse(self, client_instance: "BaseClient", response: requests.Response) -> Any:  # noqa: F821
         logger.debug("Parsing response as JSON")
         return response.json()
 
@@ -50,7 +50,7 @@ class ContentResponseParser(BaseResponseParser):
     # 设置 is_stream 为 False，因为需要完整读取响应体内容
     is_stream: bool = False
 
-    def parse(self, client_instance, response: requests.Response) -> bytes:  # noqa: ARG002
+    def parse(self, client_instance: "BaseClient", response: requests.Response) -> bytes:  # noqa: F821
         logger.debug("Parsing response as content bytes")
         # 确保响应内容被完全读取（非流式）
         # response.content 会处理 stream
@@ -62,7 +62,7 @@ class RawResponseParser(BaseResponseParser):
 
     is_stream: bool = True
 
-    def parse(self, client_instance, response: requests.Response) -> requests.Response:  # noqa: ARG002
+    def parse(self, client_instance: "BaseClient", response: requests.Response) -> requests.Response:  # noqa: F821
         logger.debug("Returning raw response object for streaming")
         # 流式处理，直接返回响应对象
         return response
@@ -92,7 +92,7 @@ class FileWriteResponseParser(BaseResponseParser):
         self.default_filename = default_filename or self.default_filename
         os.makedirs(self.base_path, exist_ok=True)
 
-    def parse(self, client_instance, response: requests.Response) -> str:  # noqa: ARG002
+    def parse(self, client_instance: "BaseClient", response: requests.Response) -> str:  # noqa: F821
         default_filename = self.default_filename
         if response.url:
             url_path = response.url.split("?")[0]
