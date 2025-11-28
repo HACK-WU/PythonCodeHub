@@ -14,12 +14,17 @@ HTTP 客户端核心模块
 
 import logging
 import uuid
-from typing import Any
+from typing import Any, TypeAlias
 
 import requests
 from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
 from urllib3.util.retry import Retry
+
+# 类型别名定义
+RequestConfig: TypeAlias = dict[str, Any]
+ResponseDict: TypeAlias = dict[str, Any]
+RequestDataType: TypeAlias = RequestConfig | list[RequestConfig] | None
 
 from ab_request.http_client.constants import (
     DEFAULT_MAX_WORKERS,
@@ -29,7 +34,6 @@ from ab_request.http_client.constants import (
     DEFAULT_TIMEOUT,
     LOG_FORMAT,
     RESPONSE_CODE_FORMATTING_ERROR,
-    RESPONSE_CODE_NON_HTTP_ERROR,
 )
 from ab_request.http_client.exceptions import (
     APIClientError,
@@ -99,10 +103,10 @@ class _RequestMethodDescriptor:
         # 情况2: 类调用（MyClient.request()）
         # 返回一个包装函数，自动创建临时实例并执行
         def class_method_wrapper(
-            request_data: dict[str, Any] | list[dict[str, Any]] | None = None,
+            request_data: RequestDataType = None,
             is_async: bool = False,
             **client_kwargs,
-        ) -> dict[str, Any] | list[dict[str, Any] | Exception]:
+        ) -> ResponseDict | list[ResponseDict | Exception]:
             """
             类方法调用的包装函数
 
@@ -207,15 +211,15 @@ class BaseClient:
 
     # 异步执行器类或实例，用于处理批量异步请求的执行策略
     # 默认使用线程池执行器，可替换为进程池或协程执行器
-    executor_class: type[BaseAsyncExecutor] | BaseAsyncExecutor | None = ThreadPoolAsyncExecutor
+    executor_class: type[BaseAsyncExecutor] | BaseAsyncExecutor = ThreadPoolAsyncExecutor
 
     # 响应数据解析器类或实例，用于解析 HTTP 响应体为 Python 对象
     # 默认使用 JSON 解析器，可替换为 XML、HTML 或自定义解析器
-    response_parser_class: type[BaseResponseParser] | BaseResponseParser | None = JSONResponseParser
+    response_parser_class: type[BaseResponseParser] | BaseResponseParser = JSONResponseParser
 
     # 响应格式化器类或实例，用于将响应统一格式化为标准结构
     # 默认格式化为 {result, code, message, data} 结构，便于统一处理
-    response_formatter_class: type[BaseResponseFormatter] | BaseResponseFormatter | None = DefaultResponseFormatter
+    response_formatter_class: type[BaseResponseFormatter] | BaseResponseFormatter = DefaultResponseFormatter
 
     def __init__(
         self,
@@ -325,35 +329,21 @@ class BaseClient:
         返回:
             AuthBase 实例或 None
 
-        执行步骤:
-            1. 优先使用实例级别传入的 authentication 参数
-            2. 如果未传入，则使用类级别的 authentication_class
-            3. 如果是类，则实例化；如果是实例，则直接使用
-            4. 验证配置的有效性
-
         异常:
             APIClientValidationError: 当认证配置类型无效时抛出
         """
-        # 优先使用实例级别配置
-        if authentication is not None:
-            if isinstance(authentication, type) and issubclass(authentication, AuthBase):
-                return authentication()
-            elif isinstance(authentication, AuthBase):
-                return authentication
-            else:
-                raise APIClientValidationError("authentication must be an AuthBase subclass or instance")
-
-        # 使用类级别配置
-        class_auth = getattr(self, "authentication_class", None)
-        if class_auth is None:
+        # 优先使用实例级别配置，否则使用类级别配置
+        source = authentication if authentication is not None else getattr(self, "authentication_class", None)
+        if source is None:
             return None
 
-        if isinstance(class_auth, type) and issubclass(class_auth, AuthBase):
-            return class_auth()
-        elif isinstance(class_auth, AuthBase):
-            return class_auth
-        else:
-            raise APIClientValidationError("authentication_class must be an AuthBase subclass or instance")
+        # 统一处理类和实例
+        if isinstance(source, type) and issubclass(source, AuthBase):
+            return source()
+        if isinstance(source, AuthBase):
+            return source
+
+        raise APIClientValidationError("authentication must be an AuthBase subclass or instance")
 
     def _resolve_executor(self, executor: BaseAsyncExecutor | type[BaseAsyncExecutor] | None) -> BaseAsyncExecutor:
         """
@@ -365,39 +355,23 @@ class BaseClient:
         返回:
             BaseAsyncExecutor 实例
 
-        执行步骤:
-            1. 优先使用实例级别传入的 executor 参数
-            2. 如果未传入，则使用类级别的 executor_class
-            3. 如果都未配置，则使用默认的 ThreadPoolAsyncExecutor
-            4. 如果是类，则实例化并传入 max_workers；如果是实例，则直接使用
-
         异常:
             APIClientValidationError: 当执行器配置类型无效时抛出
         """
-        # 优先使用实例级别配置
-        if executor is not None:
-            if isinstance(executor, type) and issubclass(executor, BaseAsyncExecutor):
-                return executor(max_workers=self.max_workers)
-            elif isinstance(executor, BaseAsyncExecutor):
-                return executor
-            else:
-                raise APIClientValidationError("executor must be a BaseAsyncExecutor subclass or instance")
+        # 优先使用实例级别配置，否则使用类级别配置
+        source = executor if executor is not None else getattr(self, "executor_class", ThreadPoolAsyncExecutor)
 
-        # 使用类级别配置
-        class_executor = getattr(self, "executor_class", None)
-        if class_executor is None:
-            return ThreadPoolAsyncExecutor(max_workers=self.max_workers)
+        # 统一处理类和实例
+        if isinstance(source, type) and issubclass(source, BaseAsyncExecutor):
+            return source(max_workers=self.max_workers)
+        if isinstance(source, BaseAsyncExecutor):
+            return source
 
-        if isinstance(class_executor, type) and issubclass(class_executor, BaseAsyncExecutor):
-            return class_executor(max_workers=self.max_workers)
-        elif isinstance(class_executor, BaseAsyncExecutor):
-            return class_executor
-        else:
-            raise APIClientValidationError("executor_class must be a BaseAsyncExecutor subclass or instance")
+        raise APIClientValidationError("executor must be a BaseAsyncExecutor subclass or instance")
 
     def _resolve_response_parser(
         self, response_parser: BaseResponseParser | type[BaseResponseParser] | None
-    ) -> BaseResponseParser | None:
+    ) -> BaseResponseParser:
         """
         解析响应解析器配置，返回解析器实例
 
@@ -405,33 +379,30 @@ class BaseClient:
             response_parser: 传入的解析器配置（类或实例）
 
         返回:
-            BaseResponseParser 实例或 None
-
-        执行步骤:
-            1. 优先使用实例级别传入的 response_parser 参数
-            2. 如果未传入，则使用类级别的 response_parser_class
-            3. 如果是类，则尝试实例化；如果是实例，则直接使用
-            4. 实例化失败时，降级使用 RawResponseParser
+            BaseResponseParser 实例（失败时返回 RawResponseParser）
         """
-        source = response_parser if response_parser is not None else getattr(self, "response_parser_class", None)
-        if source is None:
-            return None
+        source = (
+            response_parser
+            if response_parser is not None
+            else getattr(self, "response_parser_class", JSONResponseParser)
+        )
 
+        # 统一处理类和实例
         if isinstance(source, type) and issubclass(source, BaseResponseParser):
             try:
                 return source()
             except Exception as e:
-                logger.error(f"Failed to instantiate response parser class {source.__name__}: {e}")
+                logger.error(f"Failed to instantiate response parser {source.__name__}: {e}")
                 return RawResponseParser()
-        elif isinstance(source, BaseResponseParser):
+        if isinstance(source, BaseResponseParser):
             return source
-        else:
-            logger.warning(f"Invalid response parser item: {source}. Using RawResponseParser.")
-            return RawResponseParser()
+
+        logger.warning(f"Invalid response parser: {source}. Using RawResponseParser.")
+        return RawResponseParser()
 
     def _resolve_response_formatter(
         self, response_formatter: BaseResponseFormatter | type[BaseResponseFormatter] | None
-    ) -> BaseResponseFormatter | None:
+    ) -> BaseResponseFormatter:
         """
         解析响应格式化器配置，返回格式化器实例
 
@@ -439,31 +410,26 @@ class BaseClient:
             response_formatter: 传入的格式化器配置（类或实例）
 
         返回:
-            BaseResponseFormatter 实例或 None
-
-        执行步骤:
-            1. 优先使用实例级别传入的 response_formatter 参数
-            2. 如果未传入，则使用类级别的 response_formatter_class
-            3. 如果是类，则尝试实例化；如果是实例，则直接使用
-            4. 实例化失败时，降级使用 DefaultResponseFormatter
+            BaseResponseFormatter 实例（失败时返回 DefaultResponseFormatter）
         """
         source = (
-            response_formatter if response_formatter is not None else getattr(self, "response_formatter_class", None)
+            response_formatter
+            if response_formatter is not None
+            else getattr(self, "response_formatter_class", DefaultResponseFormatter)
         )
-        if source is None:
-            return None
 
+        # 统一处理类和实例
         if isinstance(source, type) and issubclass(source, BaseResponseFormatter):
             try:
                 return source()
             except Exception as e:
-                logger.error(f"Failed to instantiate response formatter class {source.__name__}: {e}")
+                logger.error(f"Failed to instantiate response formatter {source.__name__}: {e}")
                 return DefaultResponseFormatter()
-        elif isinstance(source, BaseResponseFormatter):
+        if isinstance(source, BaseResponseFormatter):
             return source
-        else:
-            logger.warning(f"Invalid response formatter item: {source}. Using DefaultResponseFormatter.")
-            return DefaultResponseFormatter()
+
+        logger.warning(f"Invalid response formatter: {source}. Using DefaultResponseFormatter.")
+        return DefaultResponseFormatter()
 
     def _create_session(self) -> requests.Session:
         """
@@ -493,7 +459,7 @@ class BaseClient:
             session.mount("https://", adapter)
         return session
 
-    def _make_request(self, request_id: str, request_config: dict[str, Any]) -> requests.Response:
+    def _make_request(self, request_id: str, request_config: RequestConfig) -> requests.Response:
         """
         执行单个 HTTP 请求，返回原始 Response 对象
 
@@ -523,11 +489,8 @@ class BaseClient:
         endpoint = request_config.get("endpoint", self._class_default_endpoint)
         url = f"{self.base_url}/{endpoint.lstrip('/')}" if endpoint else self.base_url
 
-        # 步骤2: 确定是否需要流式响应
-        stream_flag = False
-        # 如果配置了响应解析器，检查解析器是否需要流式响应（如文件下载场景）
-        if self.response_parser_instance:
-            stream_flag = getattr(self.response_parser_instance, "is_stream", False)
+        # 步骤2: 确定是否需要流式响应（检查解析器的 is_stream 属性）
+        stream_flag = getattr(self.response_parser_instance, "is_stream", False)
 
         # 步骤3: 构建请求参数字典
         request_kwargs = {
@@ -550,31 +513,25 @@ class BaseClient:
             response.raise_for_status()
             return response
 
-        except requests.exceptions.RequestException as original_exception:
+        except requests.exceptions.Timeout:
             # 情况1: 超时异常
-            if isinstance(original_exception, requests.exceptions.Timeout):
-                converted_exception = APIClientTimeoutError(f"Request to {url} timed out after {self.timeout}s")
-
+            error = APIClientTimeoutError(f"Request to {url} timed out after {self.timeout}s")
+            logger.error(f"[{request_id}] Request failed: {error}")
+            raise error
+        except requests.exceptions.HTTPError as e:
             # 情况2: HTTP 错误响应（4xx/5xx 状态码）
-            elif isinstance(original_exception, requests.exceptions.HTTPError):
-                # 提取状态码和错误原因
-                status_code = original_exception.response.status_code if original_exception.response else 0
-                converted_exception = APIClientHTTPError(
-                    f"HTTP {status_code}: "
-                    f"{original_exception.response.reason if original_exception.response else 'No response'}",
-                    response=original_exception.response,
-                )
-
+            status_code = e.response.status_code if e.response else 0
+            reason = e.response.reason if e.response else "No response"
+            error = APIClientHTTPError(f"HTTP {status_code}: {reason}", response=e.response)
+            logger.error(f"[{request_id}] Request failed: {error}")
+            raise error
+        except requests.exceptions.RequestException as e:
             # 情况3: 其他网络异常（连接失败、DNS 解析失败等）
-            else:
-                converted_exception = APIClientNetworkError(f"Request to {url} failed: {original_exception}")
+            error = APIClientNetworkError(f"Request to {url} failed: {e}")
+            logger.error(f"[{request_id}] Request failed: {error}")
+            raise error
 
-            # 步骤10: 记录错误日志并抛出转换后的异常
-            # ERROR 级别：记录请求失败信息，生产环境可见
-            logger.error(f"[{request_id}] Request failed: {converted_exception}")
-            raise converted_exception
-
-    def _make_request_and_format(self, request_id: str, request_config: dict[str, Any]) -> dict[str, Any]:
+    def _make_request_and_format(self, request_id: str, request_config: RequestConfig) -> ResponseDict:
         """
         执行请求、解析响应并格式化结果的完整流程
 
@@ -594,10 +551,9 @@ class BaseClient:
             6. 处理格式化失败的情况，返回降级响应
         """
         # 步骤1: 为 FileWriteResponseParser 传递文件名
-        if self.response_parser_instance and isinstance(self.response_parser_instance, FileWriteResponseParser):
-            filename_from_config = request_config.get("filename")
-            if filename_from_config:
-                self.response_parser_instance._current_filename = filename_from_config
+        parser = self.response_parser_instance
+        if isinstance(parser, FileWriteResponseParser) and (filename := request_config.get("filename")):
+            parser._current_filename = filename
 
         # 步骤2: 执行请求并捕获响应或异常
         parsed_data: Any = None
@@ -608,71 +564,40 @@ class BaseClient:
             response_or_exception = response
 
             # 步骤3: 解析响应数据（仅在请求成功时）
-            if self.response_parser_instance:
-                try:
-                    logger.debug(f"[{request_id}] Parsing response data")
-                    parsed_data = self.response_parser_instance.parse(self, response)
-                    logger.debug(f"[{request_id}] Response data parsed successfully")
-                except Exception as e:
-                    # 捕获解析错误，但不立即抛出，交给格式化器处理
-                    parse_error = e
-                    logger.error(f"[{request_id}] Response parsing failed: {e}")
+            try:
+                logger.debug(f"[{request_id}] Parsing response data")
+                parsed_data = parser.parse(self, response)
+                logger.debug(f"[{request_id}] Response data parsed successfully")
+            except Exception as e:
+                # 捕获解析错误，但不立即抛出，交给格式化器处理
+                parse_error = e
+                logger.error(f"[{request_id}] Response parsing failed: {e}")
         except APIClientError as e:
             response_or_exception = e
         finally:
             # 步骤4: 清理临时属性，避免状态污染
-            if (
-                self.response_parser_instance
-                and isinstance(self.response_parser_instance, FileWriteResponseParser)
-                and hasattr(self.response_parser_instance, "_current_filename")
-            ):
-                delattr(self.response_parser_instance, "_current_filename")
+            if isinstance(parser, FileWriteResponseParser) and hasattr(parser, "_current_filename"):
+                delattr(parser, "_current_filename")
 
         # 步骤5: 使用格式化器格式化结果
-        if self.response_formatter_instance:
-            try:
-                formatted_data = self.response_formatter_instance.format(
-                    self, response_or_exception, request_config, parsed_data, parse_error
-                )
-                return formatted_data
-            except Exception as format_error:
-                logger.error(f"[{request_id}] Response formatting failed: {format_error}")
-                # 格式化失败时的降级处理
-                return {
-                    "result": False,
-                    "code": RESPONSE_CODE_FORMATTING_ERROR,
-                    "message": f"Formatting failed: {format_error}",
-                    "data": None,
-                }
-
-        # 步骤6: 未配置格式化器时的降级处理
-        if isinstance(response_or_exception, requests.Response):
-            # 如果有解析错误，标记为失败
-            if parse_error:
-                return {
-                    "result": False,
-                    "code": response_or_exception.status_code,
-                    "message": f"Parsing failed: {parse_error}",
-                    "data": None,
-                }
-            return {
-                "result": True,
-                "code": response_or_exception.status_code,
-                "message": "Success (No formatter)",
-                "data": parsed_data if parsed_data is not None else response_or_exception,
-            }
-        else:  # APIClientError
+        try:
+            return self.response_formatter_instance.format(
+                self, response_or_exception, request_config, parsed_data, parse_error
+            )
+        except Exception as format_error:
+            logger.error(f"[{request_id}] Response formatting failed: {format_error}")
+            # 格式化失败时的降级处理
             return {
                 "result": False,
-                "code": getattr(response_or_exception, "status_code", RESPONSE_CODE_NON_HTTP_ERROR),
-                "message": str(response_or_exception),
+                "code": RESPONSE_CODE_FORMATTING_ERROR,
+                "message": f"Formatting failed: {format_error}",
                 "data": None,
             }
 
     @_RequestMethodDescriptor
     def request(
-        self, request_data: dict[str, Any] | list[dict[str, Any]] | None = None, is_async: bool = False
-    ) -> dict[str, Any] | list[dict[str, Any] | Exception]:
+        self, request_data: RequestDataType = None, is_async: bool = False
+    ) -> ResponseDict | list[ResponseDict | Exception]:
         """
         执行 HTTP 请求的统一入口方法（支持实例调用和类调用）
 
@@ -722,24 +647,25 @@ class BaseClient:
         异常:
             APIClientValidationError: 当 request_data 类型无效时抛出
         """
-        if request_data is None:
-            request_data = {}
-        if isinstance(request_data, dict):
+        # 处理单个请求
+        if request_data is None or isinstance(request_data, dict):
             request_id = f"REQ-{uuid.uuid4().hex[:6]}"
-            # 调用封装好的方法，它会处理解析和格式化
-            return self._make_request_and_format(request_id, request_data)
+            return self._make_request_and_format(request_id, request_data or {})
 
+        # 处理批量请求
         if isinstance(request_data, list):
             if not request_data:
                 logger.warning("Empty request list provided")
                 return []
-            if is_async:
-                # 异步执行器现在返回格式化后的数据
-                return self.executor_instance.execute(self, request_data)
-            return self._execute_sync_requests(request_data)
+            return (
+                self.executor_instance.execute(self, request_data)
+                if is_async
+                else self._execute_sync_requests(request_data)
+            )
+
         raise APIClientValidationError("request_data must be a dictionary or a list of dictionaries")
 
-    def _execute_sync_requests(self, request_list: list[dict[str, Any]]) -> list[dict[str, Any] | Exception]:
+    def _execute_sync_requests(self, request_list: list[RequestConfig]) -> list[ResponseDict | Exception]:
         """
         同步顺序执行多个请求
 
