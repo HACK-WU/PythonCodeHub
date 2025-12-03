@@ -41,6 +41,7 @@ from ab_request.http_client.parser import (
     FileWriteResponseParser,
     JSONResponseParser,
     RawResponseParser,
+    StreamResponseParser,
 )
 
 # 响应格式化器
@@ -94,6 +95,7 @@ __all__ = [
     "JSONResponseParser",
     "ContentResponseParser",
     "RawResponseParser",
+    "StreamResponseParser",
     "FileWriteResponseParser",
     # 格式化器
     "BaseResponseFormatter",

@@ -58,13 +58,40 @@ class ContentResponseParser(BaseResponseParser):
 
 
 class RawResponseParser(BaseResponseParser):
-    """返回原始响应对象以支持流式处理"""
+    """返回原始响应对象"""
+
+    is_stream: bool = False
+
+    def parse(self, client_instance: "BaseClient", response: requests.Response) -> requests.Response:  # noqa: F821
+        logger.debug("Returning raw response object")
+        return response
+
+
+class StreamResponseParser(BaseResponseParser):
+    """
+    流式响应解析器
+
+    返回原始响应对象，但启用流式读取模式。
+    适用于需要逐块处理响应内容的场景，如大文件下载、实时数据流等。
+
+    注意:
+        - 响应内容不会自动加载到内存
+        - 需要使用 response.iter_content() 或 response.iter_lines() 逐块读取
+        - Session 关闭后将无法读取响应内容
+        - 适合处理大型响应或需要边接收边处理的场景
+
+    使用示例:
+        >>> client = MyClient(response_parser=StreamResponseParser())
+        >>> result = client.request({"endpoint": "/large-file"})
+        >>> response = result["data"]
+        >>> for chunk in response.iter_content(chunk_size=8192):
+        >>>     process_chunk(chunk)
+    """
 
     is_stream: bool = True
 
     def parse(self, client_instance: "BaseClient", response: requests.Response) -> requests.Response:  # noqa: F821
-        logger.debug("Returning raw response object for streaming")
-        # 流式处理，直接返回响应对象
+        logger.debug("Returning raw response object with streaming enabled")
         return response
 
 
