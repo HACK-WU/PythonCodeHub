@@ -58,3 +58,30 @@ class APIClientValidationError(APIClientError):
 
     当请求参数、配置等输入数据验证失败时抛出此异常
     """
+
+
+class APIClientResponseValidationError(APIClientError):
+    """
+    响应验证异常
+
+    当响应内容不符合预期的验证规则时抛出此异常
+
+    参数:
+        message: 错误描述信息
+        response: 原始的 requests.Response 对象（可选）
+        validation_result: 验证结果详情（可选）
+
+    属性:
+        response: 保存原始响应对象
+        validation_result: 验证失败的详细信息
+    """
+
+    def __init__(
+        self,
+        message: str,
+        response: requests.Response | None = None,
+        validation_result: dict | None = None,
+    ):
+        super().__init__(message)
+        self.response = response
+        self.validation_result = validation_result or {}

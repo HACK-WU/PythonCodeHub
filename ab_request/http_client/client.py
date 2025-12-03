@@ -50,6 +50,7 @@ from ab_request.http_client.parser import (
     JSONResponseParser,
     RawResponseParser,
 )
+from ab_request.http_client.validator import BaseResponseValidator
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -221,6 +222,10 @@ class BaseClient:
     # 默认格式化为 {result, code, message, data} 结构，便于统一处理
     response_formatter_class: type[BaseResponseFormatter] | BaseResponseFormatter = DefaultResponseFormatter
 
+    # 响应验证器类或实例，用于验证响应是否符合预期
+    # None 表示不进行响应验证，可设置为自定义验证器进行业务逻辑验证
+    response_validator_class: type[BaseResponseValidator] | BaseResponseValidator | None = None
+
     def __init__(
         self,
         default_headers: dict[str, str] | None = None,
@@ -234,6 +239,7 @@ class BaseClient:
         executor: BaseAsyncExecutor | type[BaseAsyncExecutor] | None = None,
         response_parser: BaseResponseParser | type[BaseResponseParser] | None = None,
         response_formatter: BaseResponseFormatter | type[BaseResponseFormatter] | None = None,
+        response_validator: BaseResponseValidator | type[BaseResponseValidator] | None = None,
         **kwargs,
     ):
         """
@@ -251,11 +257,12 @@ class BaseClient:
             executor: 异步执行器类或实例
             response_parser: 响应解析器类或实例
             response_formatter: 响应格式化器类或实例
+            response_validator: 响应验证器类或实例
             **kwargs: 其他传递给 requests 的参数
 
         执行步骤:
             1. 验证并规范化 base_url
-            2. 解析并初始化认证、执行器、解析器、格式化器
+            2. 解析并初始化认证、执行器、解析器、格式化器、验证器
             3. 合并请求头配置（类级别 + 实例级别）
             4. 合并重试策略和连接池配置
             5. 创建并配置 requests.Session 对象
@@ -293,6 +300,9 @@ class BaseClient:
 
         # 解析响应格式化器：用于格式化解析后的响应数据
         self.response_formatter_instance = self._resolve_response_formatter(response_formatter)
+
+        # 解析响应验证器：用于验证响应是否符合预期
+        self.response_validator_instance = self._resolve_response_validator(response_validator)
 
         # ========== 步骤4: 合并请求头配置 ==========
         # 合并顺序：类级别默认请求头 -> 实例级别请求头 -> kwargs 中的请求头
@@ -407,6 +417,20 @@ class BaseClient:
         return self._resolve_component(
             response_formatter, "response_formatter_class", BaseResponseFormatter, DefaultResponseFormatter
         )
+
+    def _resolve_response_validator(
+        self, response_validator: BaseResponseValidator | type[BaseResponseValidator] | None
+    ) -> BaseResponseValidator | None:
+        """
+        解析响应验证器配置，返回验证器实例
+
+        参数:
+            response_validator: 传入的验证器配置（类或实例）
+
+        返回:
+            BaseResponseValidator 实例或 None
+        """
+        return self._resolve_component(response_validator, "response_validator_class", BaseResponseValidator, None)
 
     def _merge_config(self, base_config: dict, override_config: dict | None, **extra_updates) -> dict:
         """
@@ -606,7 +630,7 @@ class BaseClient:
 
     def _parse_response(self, request_id: str, response: requests.Response) -> tuple[Any, Exception | None]:
         """
-        解析响应数据
+        解析响应数据并执行验证
 
         参数:
             request_id: 请求唯一标识符
@@ -614,14 +638,33 @@ class BaseClient:
 
         返回:
             (解析后的数据, 解析错误)
+
+        执行顺序:
+            1. 先执行响应验证（基于原始响应，如状态码验证）
+            2. 解析响应数据
+            3. 再次执行验证（基于解析后的数据，如字段验证）
         """
         try:
+            # 步骤1: 执行响应验证（验证原始响应，传入 None 作为 parsed_data）
+            if self.response_validator_instance:
+                logger.debug(f"[{request_id}] Validating raw response")
+                self.response_validator_instance.validate(self, response, None)
+                logger.debug(f"[{request_id}] Raw response validation passed")
+
+            # 步骤2: 解析响应数据
             logger.debug(f"[{request_id}] Parsing response data")
             parsed_data = self.response_parser_instance.parse(self, response)
             logger.debug(f"[{request_id}] Response data parsed successfully")
+
+            # 步骤3: 执行解析后数据的验证
+            if self.response_validator_instance:
+                logger.debug(f"[{request_id}] Validating parsed response data")
+                self.response_validator_instance.validate(self, response, parsed_data)
+                logger.debug(f"[{request_id}] Parsed data validation passed")
+
             return parsed_data, None
         except Exception as e:
-            logger.error(f"[{request_id}] Response parsing failed: {e}")
+            logger.error(f"[{request_id}] Response validation/parsing failed: {e}")
             return None, e
 
     def _format_response(

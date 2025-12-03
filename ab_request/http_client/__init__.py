@@ -30,6 +30,7 @@ from ab_request.http_client.exceptions import (
     APIClientError,
     APIClientHTTPError,
     APIClientNetworkError,
+    APIClientResponseValidationError,
     APIClientTimeoutError,
     APIClientValidationError,
 )
@@ -54,6 +55,14 @@ from ab_request.http_client.formatter import (
 from ab_request.http_client.async_executor import (
     BaseAsyncExecutor,
     ThreadPoolAsyncExecutor,
+)
+
+# 响应验证器
+from ab_request.http_client.validator import (
+    BaseResponseValidator,
+    CustomValidator,
+    JSONFieldValidator,
+    StatusCodeValidator,
 )
 
 # 缓存支持
@@ -90,6 +99,7 @@ __all__ = [
     "APIClientNetworkError",
     "APIClientTimeoutError",
     "APIClientValidationError",
+    "APIClientResponseValidationError",
     # 解析器
     "BaseResponseParser",
     "JSONResponseParser",
@@ -103,6 +113,11 @@ __all__ = [
     # 执行器
     "BaseAsyncExecutor",
     "ThreadPoolAsyncExecutor",
+    # 验证器
+    "BaseResponseValidator",
+    "StatusCodeValidator",
+    "JSONFieldValidator",
+    "CustomValidator",
     # 缓存
     "BaseCacheBackend",
     "InMemoryCacheBackend",
