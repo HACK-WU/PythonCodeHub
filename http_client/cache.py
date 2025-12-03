@@ -17,7 +17,7 @@ from typing import Any
 
 import redis
 
-from ab_request.http_client.constants import (
+from http_client.constants import (
     CACHEABLE_METHODS,
     DEFAULT_CACHE_EXPIRE,
     DEFAULT_CACHE_MAXSIZE,

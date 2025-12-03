@@ -11,8 +11,8 @@ from collections.abc import Callable
 
 import requests
 
-from ab_request.http_client.constants import LOG_FORMAT
-from ab_request.http_client.exceptions import APIClientResponseValidationError
+from http_client.constants import LOG_FORMAT
+from http_client.exceptions import APIClientResponseValidationError
 
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)

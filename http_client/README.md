@@ -60,11 +60,13 @@ ab_request/http_client/
 ### 基本使用
 
 ```python
-from ab_request.http_client import BaseClient, JSONResponseParser
+from http_client import BaseClient, JSONResponseParser
+
 
 class MyAPIClient(BaseClient):
     base_url = "https://api.example.com"
     response_parser_class = JSONResponseParser
+
 
 # 创建客户端实例
 client = MyAPIClient()
@@ -93,11 +95,13 @@ results = client.request([
 ### 使用缓存
 
 ```python
-from ab_request.http_client import CacheClientMixin
+from http_client import CacheClientMixin
+
 
 class CachedAPIClient(CacheClientMixin, BaseClient):
     base_url = "https://api.example.com"
     default_cache_expire = 300  # 5分钟
+
 
 client = CachedAPIClient()
 
@@ -134,7 +138,7 @@ class AuthenticatedClient(BaseClient):
 
 ## 📚 更多示例
 
-查看 [examples.py](./examples.py) 获取更多使用示例。
+查看 [examples.py](examples.py) 获取更多使用示例。
 
 运行示例：
 ```bash

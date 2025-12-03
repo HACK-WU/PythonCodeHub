@@ -11,7 +11,7 @@ from typing import Any
 
 import requests
 
-from ab_request.http_client.constants import (
+from http_client.constants import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_DOWNLOAD_PATH,
     DEFAULT_FILENAME,

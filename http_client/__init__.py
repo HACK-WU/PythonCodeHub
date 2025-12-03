@@ -12,7 +12,7 @@ AB Request HTTP Client 模块
     - 缓存: CacheClientMixin, InMemoryCacheBackend, RedisCacheBackend
 
 使用示例:
-    >>> from ab_request.http_client import BaseClient, JSONResponseParser
+    >>> from http_client import BaseClient, JSONResponseParser
     >>>
     >>> class MyAPIClient(BaseClient):
     ...     base_url = "https://api.example.com"
@@ -23,10 +23,10 @@ AB Request HTTP Client 模块
 """
 
 # 核心客户端
-from ab_request.http_client.client import BaseClient
+from http_client.client import BaseClient
 
 # 异常类
-from ab_request.http_client.exceptions import (
+from http_client.exceptions import (
     APIClientError,
     APIClientHTTPError,
     APIClientNetworkError,
@@ -36,7 +36,7 @@ from ab_request.http_client.exceptions import (
 )
 
 # 响应解析器
-from ab_request.http_client.parser import (
+from http_client.parser import (
     BaseResponseParser,
     ContentResponseParser,
     FileWriteResponseParser,
@@ -46,19 +46,19 @@ from ab_request.http_client.parser import (
 )
 
 # 响应格式化器
-from ab_request.http_client.formatter import (
+from http_client.formatter import (
     BaseResponseFormatter,
     DefaultResponseFormatter,
 )
 
 # 异步执行器
-from ab_request.http_client.async_executor import (
+from http_client.async_executor import (
     BaseAsyncExecutor,
     ThreadPoolAsyncExecutor,
 )
 
 # 响应验证器
-from ab_request.http_client.validator import (
+from http_client.validator import (
     BaseResponseValidator,
     CustomValidator,
     JSONFieldValidator,
@@ -66,7 +66,7 @@ from ab_request.http_client.validator import (
 )
 
 # 缓存支持
-from ab_request.http_client.cache import (
+from http_client.cache import (
     BaseCacheBackend,
     CacheClientMixin,
     InMemoryCacheBackend,
@@ -74,7 +74,7 @@ from ab_request.http_client.cache import (
 )
 
 # 常量配置
-from ab_request.http_client.constants import (
+from http_client.constants import (
     CACHEABLE_METHODS,
     DEFAULT_CACHE_EXPIRE,
     DEFAULT_MAX_WORKERS,

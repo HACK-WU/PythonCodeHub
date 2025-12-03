@@ -10,8 +10,8 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
 
-from ab_request.http_client.constants import LOG_FORMAT
-from ab_request.http_client.exceptions import APIClientError
+from http_client.constants import LOG_FORMAT
+from http_client.exceptions import APIClientError
 
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)

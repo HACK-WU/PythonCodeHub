@@ -10,12 +10,12 @@ from typing import Any
 
 import requests
 
-from ab_request.http_client.constants import (
+from http_client.constants import (
     LOG_FORMAT,
     RESPONSE_CODE_NON_HTTP_ERROR,
     RESPONSE_CODE_UNEXPECTED_TYPE,
 )
-from ab_request.http_client.exceptions import APIClientError
+from http_client.exceptions import APIClientError
 
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)

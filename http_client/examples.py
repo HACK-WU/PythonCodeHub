@@ -1,12 +1,12 @@
 """
 HTTP 客户端使用示例
 
-演示如何使用 ab_request.http_client 模块的各种功能
+演示如何使用 http_client 模块的各种功能
 """
 
 from requests.auth import AuthBase
 
-from ab_request.http_client import (
+from http_client import (
     BaseClient,
     ContentResponseParser,
     JSONResponseParser,

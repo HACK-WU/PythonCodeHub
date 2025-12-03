@@ -26,7 +26,7 @@ RequestConfig: TypeAlias = dict[str, Any]
 ResponseDict: TypeAlias = dict[str, Any]
 RequestDataType: TypeAlias = RequestConfig | list[RequestConfig] | None
 
-from ab_request.http_client.constants import (
+from http_client.constants import (
     DEFAULT_MAX_WORKERS,
     DEFAULT_POOL_CONFIG,
     DEFAULT_RETRIES,
@@ -35,22 +35,22 @@ from ab_request.http_client.constants import (
     LOG_FORMAT,
     RESPONSE_CODE_FORMATTING_ERROR,
 )
-from ab_request.http_client.exceptions import (
+from http_client.exceptions import (
     APIClientError,
     APIClientHTTPError,
     APIClientNetworkError,
     APIClientTimeoutError,
     APIClientValidationError,
 )
-from ab_request.http_client.async_executor import BaseAsyncExecutor, ThreadPoolAsyncExecutor
-from ab_request.http_client.formatter import BaseResponseFormatter, DefaultResponseFormatter
-from ab_request.http_client.parser import (
+from http_client.async_executor import BaseAsyncExecutor, ThreadPoolAsyncExecutor
+from http_client.formatter import BaseResponseFormatter, DefaultResponseFormatter
+from http_client.parser import (
     BaseResponseParser,
     FileWriteResponseParser,
     JSONResponseParser,
     RawResponseParser,
 )
-from ab_request.http_client.validator import BaseResponseValidator
+from http_client.validator import BaseResponseValidator
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
