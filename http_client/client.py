@@ -156,6 +156,7 @@ class BaseClient:
         endpoint: 默认端点路径
         method: 默认 HTTP 方法
         default_timeout: 默认超时时间（秒）
+        enable_retry: 是否启用重试机制（默认 False）
         default_retries: 默认重试次数
         default_headers: 默认请求头
         max_workers: 异步执行时的最大工作线程数
@@ -186,6 +187,9 @@ class BaseClient:
     # ========== 超时和重试配置 ==========
     # 默认请求超时时间（秒），防止请求无限期挂起
     default_timeout: int = DEFAULT_TIMEOUT
+
+    # 是否启用重试机制，默认不启用
+    enable_retry: bool = False
 
     # 默认失败重试次数，0 表示不重试，适用于幂等性请求
     default_retries: int = DEFAULT_RETRIES
@@ -243,6 +247,7 @@ class BaseClient:
         default_headers: dict[str, str] | None = None,
         timeout: int | None = None,
         verify: bool | None = None,
+        enable_retry: bool | None = None,
         retries: int | None = None,
         max_workers: int | None = None,
         retry_config: dict[str, Any] | None = None,
@@ -295,6 +300,7 @@ class BaseClient:
 
         # ========== 步骤2: 初始化实例级别的配置参数 ==========
         self.timeout = timeout if timeout is not None else self.default_timeout
+        self.enable_retry = enable_retry if enable_retry is not None else self.enable_retry
         self.retries = retries if retries is not None else self.default_retries
         self.verify = verify if verify is not None else self.verify
         self.max_workers = max_workers if max_workers is not None else self.max_workers
@@ -547,7 +553,7 @@ class BaseClient:
         if self.auth_instance:
             session.auth = self.auth_instance
 
-        if self.retries > 0:
+        if self.enable_retry and self.retries > 0:
             # 使用配置字典创建重试策略
             retry_strategy = Retry(**self.retry_config)
             # 使用配置字典创建 HTTP 适配器
