@@ -23,7 +23,7 @@ AB Request HTTP Client 模块
 """
 
 # 核心客户端
-from http_client.client import BaseClient
+from http_client.client import BaseClient, DRFClient
 
 # 异常类
 from http_client.exceptions import (
@@ -93,6 +93,7 @@ from http_client.constants import (
 __all__ = [
     # 核心类
     "BaseClient",
+    "DRFClient",
     # 异常
     "APIClientError",
     "APIClientHTTPError",

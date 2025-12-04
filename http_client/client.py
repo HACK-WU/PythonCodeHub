@@ -20,6 +20,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
 from urllib3.util.retry import Retry
+from rest_framework import serializers
 
 # 类型别名定义
 RequestConfig: TypeAlias = dict[str, Any]
@@ -39,6 +40,7 @@ from http_client.exceptions import (
     APIClientError,
     APIClientHTTPError,
     APIClientNetworkError,
+    APIClientRequestValidationError,
     APIClientTimeoutError,
     APIClientValidationError,
 )
@@ -50,6 +52,7 @@ from http_client.parser import (
     JSONResponseParser,
     RawResponseParser,
 )
+from http_client.serializer import BaseRequestSerializer
 from http_client.validator import BaseResponseValidator
 
 # 配置日志
@@ -226,6 +229,13 @@ class BaseClient:
     # None 表示不进行响应验证，可设置为自定义验证器进行业务逻辑验证
     response_validator_class: type[BaseResponseValidator] | BaseResponseValidator | None = None
 
+    # 请求序列化器类或实例，用于在发送请求前验证请求参数
+    # None 表示不进行请求参数验证
+    # 支持两种方式定义:
+    # 1. 类属性: request_serializer_class = MyRequestSerializer
+    # 2. 内嵌类: 在子类中定义 class RequestSerializer(BaseRequestSerializer)
+    request_serializer_class: type[BaseRequestSerializer] | BaseRequestSerializer | None = None
+
     def __init__(
         self,
         default_headers: dict[str, str] | None = None,
@@ -240,6 +250,7 @@ class BaseClient:
         response_parser: BaseResponseParser | type[BaseResponseParser] | None = None,
         response_formatter: BaseResponseFormatter | type[BaseResponseFormatter] | None = None,
         response_validator: BaseResponseValidator | type[BaseResponseValidator] | None = None,
+        request_serializer: BaseRequestSerializer | type[BaseRequestSerializer] | None = None,
         **kwargs,
     ):
         """
@@ -303,6 +314,9 @@ class BaseClient:
 
         # 解析响应验证器：用于验证响应是否符合预期
         self.response_validator_instance = self._resolve_response_validator(response_validator)
+
+        # 解析请求序列化器：用于在发送请求前验证请求参数
+        self.request_serializer_instance = self._resolve_request_serializer(request_serializer)
 
         # ========== 步骤4: 合并请求头配置 ==========
         # 合并顺序：类级别默认请求头 -> 实例级别请求头 -> kwargs 中的请求头
@@ -431,6 +445,65 @@ class BaseClient:
             BaseResponseValidator 实例或 None
         """
         return self._resolve_component(response_validator, "response_validator_class", BaseResponseValidator, None)
+
+    def _resolve_request_serializer(
+        self, request_serializer: BaseRequestSerializer | type[BaseRequestSerializer] | None
+    ) -> BaseRequestSerializer | None:
+        """
+        解析请求序列化器配置，返回序列化器实例
+
+        解析优先级（从高到低）:
+            1. 构造函数传入的 request_serializer 参数
+            2. 类属性 request_serializer_class
+            3. 内嵌类 RequestSerializer（在子类中定义）
+
+        参数:
+            request_serializer: 传入的序列化器配置（类或实例）
+
+        返回:
+            BaseRequestSerializer 实例或 None
+        """
+        # 优先使用传入的参数
+        if request_serializer is not None:
+            return self._resolve_component(request_serializer, "request_serializer_class", BaseRequestSerializer, None)
+
+        # 其次使用类属性
+        if self.request_serializer_class is not None:
+            return self._resolve_component(None, "request_serializer_class", BaseRequestSerializer, None)
+
+        # 最后检查是否有内嵌的 RequestSerializer 类
+        request_serializer_cls = getattr(self.__class__, "RequestSerializer", None)
+        if request_serializer_cls is not None and isinstance(request_serializer_cls, type):
+            if issubclass(request_serializer_cls, BaseRequestSerializer):
+                try:
+                    return request_serializer_cls()
+                except Exception as e:
+                    logger.error(f"Failed to instantiate RequestSerializer: {e}")
+                    raise APIClientValidationError(f"RequestSerializer instantiation failed: {e}")
+
+        return None
+
+    def _validate_request(
+        self, request_config: RequestConfig | list[RequestConfig]
+    ) -> RequestConfig | list[RequestConfig]:
+        """
+        使用序列化器验证请求参数
+
+        参数:
+            request_id: 请求唯一标识符
+            request_config: 请求配置字典
+
+        返回:
+            验证并可能转换后的请求配置
+
+        异常:
+            APIClientRequestValidationError: 当验证失败时抛出
+        """
+        if self.request_serializer_instance is None:
+            return request_config
+
+        validated_config = self.request_serializer_instance.validate(request_config)
+        return validated_config
 
     def _merge_config(self, base_config: dict, override_config: dict | None, **extra_updates) -> dict:
         """
@@ -774,9 +847,18 @@ class BaseClient:
 
         返回:
             格式化后的响应字典
+
+        执行步骤:
+            1. 生成请求 ID
+            2. 使用序列化器验证请求参数（如果配置了序列化器）
+            3. 执行 HTTP 请求并格式化结果
         """
         request_id = f"REQ-{uuid.uuid4().hex[:8]}"
-        return self._make_request_and_format(request_id, request_config)
+
+        # 验证请求参数
+        validated_config = self._validate_request(request_config)
+
+        return self._make_request_and_format(request_id, validated_config)
 
     def _execute_batch_requests(
         self, request_list: list[RequestConfig], is_async: bool
@@ -794,6 +876,8 @@ class BaseClient:
         if not request_list:
             logger.warning("Empty request list provided")
             return []
+
+        request_list = self._validate_request(request_list)
 
         return (
             self.executor_instance.execute(self, request_list)
@@ -855,3 +939,104 @@ class BaseClient:
             exc_tb: 异常追踪信息
         """
         self.close()
+
+
+class DRFClient(BaseClient):
+    """
+    支持 DRF 序列化器的 HTTP 客户端
+
+    继承自 BaseClient，直接使用 Django REST Framework 序列化器进行请求参数验证。
+    可以将 DRF 的 Serializer 类直接赋值给 request_serializer_class。
+
+    使用示例:
+        from rest_framework import serializers
+
+        class CreateUserSerializer(serializers.Serializer):
+            username = serializers.CharField(max_length=100, required=True)
+            email = serializers.EmailField(required=True)
+            age = serializers.IntegerField(min_value=0, max_value=150, required=False)
+
+        class UserAPIClient(DRFClient):
+            base_url = "https://api.example.com"
+            endpoint = "/users"
+            method = "POST"
+            request_serializer_class = CreateUserSerializer
+
+        # 发送请求（会自动验证 json 中的数据）
+        result = UserAPIClient.request({
+            "json": {
+                "username": "john_doe",
+                "email": "john@example.com",
+                "age": 25
+            }
+        })
+    """
+
+    request_serializer_instance: type[serializers.Serializer] | None = None
+
+    def _resolve_request_serializer(self, request_serializer):
+        """
+        解析请求序列化器，直接返回 DRF Serializer 类
+
+        参数:
+            request_serializer: 传入的序列化器类
+
+        返回:
+            DRF Serializer 类或 None
+
+        异常:
+            APIClientValidationError: 当传入的不是 DRF Serializer 类时抛出
+        """
+
+        source = request_serializer
+        if source is None:
+            source = self.request_serializer_class
+        if source is None:
+            source = getattr(self.__class__, "RequestSerializer", None)
+
+        # 如果没有配置序列化器，直接返回 None
+        if source is None:
+            return None
+
+        # 类型校验：必须是 DRF Serializer 的子类
+        if isinstance(source, type) and issubclass(source, serializers.Serializer):
+            return source
+
+        # 如果是实例，检查是否是 DRF Serializer 的实例
+        if isinstance(source, serializers.Serializer):
+            return source.__class__
+
+        # 类型不匹配，抛出异常
+        raise APIClientValidationError(
+            f"request_serializer must be a DRF Serializer class or instance, got {type(source).__name__}"
+        )
+
+    def _validate_request(
+        self, request_config: RequestConfig | list[RequestConfig]
+    ) -> RequestConfig | list[RequestConfig]:
+        """
+        使用 DRF 序列化器验证请求参数
+
+        参数:
+            request_id: 请求唯一标识符
+            request_config: 请求配置字典或字典列表
+
+        返回:
+            验证并转换后的请求配置
+
+        异常:
+            APIClientRequestValidationError: 当验证失败时抛出
+        """
+        if self.request_serializer_instance is None:
+            return request_config
+
+        # 判断是否为列表，使用 many=True 进行批量验证
+        is_many = isinstance(request_config, list)
+        serializer = self.request_serializer_instance(data=request_config, many=is_many)
+
+        if not serializer.is_valid():
+            raise APIClientRequestValidationError("请求参数验证失败", errors=serializer.errors)
+
+        request_config = serializer.data
+
+        return request_config

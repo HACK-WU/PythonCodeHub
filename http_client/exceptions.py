@@ -60,6 +60,25 @@ class APIClientValidationError(APIClientError):
     """
 
 
+class APIClientRequestValidationError(APIClientError):
+    """
+    请求参数验证异常
+
+    当请求参数不符合序列化器定义的验证规则时抛出此异常
+
+    参数:
+        message: 错误描述信息
+        errors: 验证错误详情字典（可选）
+
+    属性:
+        errors: 验证失败的详细错误信息，格式为 {field_name: [error_messages]}
+    """
+
+    def __init__(self, message: str, errors: dict | None = None):
+        super().__init__(message)
+        self.errors = errors or {}
+
+
 class APIClientResponseValidationError(APIClientError):
     """
     响应验证异常
