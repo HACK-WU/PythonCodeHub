@@ -163,9 +163,11 @@ class BaseClient:
         pool_config: 连接池配置字典
         verify: SSL 证书验证开关（默认 False，不验证证书）
         authentication_class: 认证类或实例
-        executor_class: 异步执行器类或实例
+        async_executor_class: 异步执行器类或实例
         response_parser_class: 响应数据解析器类或实例
         response_formatter_class: 响应格式化器类或实例
+        response_validator_class: 响应验证器类或实例
+        request_serializer_class: 请求序列化器类或实例
     """
 
     # ========== 基础配置 ==========
@@ -215,7 +217,7 @@ class BaseClient:
 
     # 异步执行器类或实例，用于处理批量异步请求的执行策略
     # 默认使用线程池执行器，可替换为进程池或协程执行器
-    executor_class: type[BaseAsyncExecutor] | BaseAsyncExecutor = ThreadPoolAsyncExecutor
+    async_executor_class: type[BaseAsyncExecutor] | BaseAsyncExecutor = ThreadPoolAsyncExecutor
 
     # 响应数据解析器类或实例，用于解析 HTTP 响应体为 Python 对象
     # 默认使用 JSON 解析器，可替换为 XML、HTML 或自定义解析器
@@ -269,6 +271,7 @@ class BaseClient:
             response_parser: 响应解析器类或实例
             response_formatter: 响应格式化器类或实例
             response_validator: 响应验证器类或实例
+            request_serializer: 请求序列化器类或实例
             **kwargs: 其他传递给 requests 的参数
 
         执行步骤:
@@ -399,7 +402,7 @@ class BaseClient:
             BaseAsyncExecutor 实例
         """
         return self._resolve_component(
-            executor, "executor_class", BaseAsyncExecutor, ThreadPoolAsyncExecutor, max_workers=self.max_workers
+            executor, "async_executor_class", BaseAsyncExecutor, ThreadPoolAsyncExecutor, max_workers=self.max_workers
         )
 
     def _resolve_response_parser(
