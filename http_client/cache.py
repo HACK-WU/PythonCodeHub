@@ -196,12 +196,12 @@ class RedisCacheBackend(BaseCacheBackend):
 
 
 def _generate_cache_key(
-    base_url: str, endpoint: str, method: str, request_kwargs: dict[str, Any], user_identifier: str | None = None
+    url: str, method: str, request_kwargs: dict[str, Any], user_identifier: str | None = None
 ) -> str:
     """生成稳定的缓存键"""
     # 创建请求信息的精简表示
     key_data = {
-        "url": f"{base_url}/{endpoint}".rstrip("/"),
+        "url": url,
         "method": method.upper(),
     }
 
@@ -231,6 +231,10 @@ class CacheClientMixin:
     - 灵活的缓存后端（内存/Redis）
     - 缓存刷新和清除
 
+    使用方式：
+        class MyAPIClient(BaseClient, CacheClientMixin):
+            pass
+
     类属性:
         cache_backend_class: 缓存后端类
         default_cache_expire: 默认缓存过期时间（秒）
@@ -249,6 +253,7 @@ class CacheClientMixin:
         cache_expire: int | None = None,
         user_identifier: str | None = None,
         cache_enabled: bool = True,
+        should_cache_response_func: callable | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -257,6 +262,7 @@ class CacheClientMixin:
         self._cache_enabled = cache_enabled
         self._cache_expire = cache_expire or self.default_cache_expire
         self._user_identifier = user_identifier
+        self._should_cache_response_func = should_cache_response_func
         # 初始化缓存后端
         self.cache_backend = self._init_cache_backend()
 
@@ -295,9 +301,28 @@ class CacheClientMixin:
         self.cacheless = functools.partial(self._uncached_request, mode="cacheless")
         self.refresh = functools.partial(self._uncached_request, mode="refresh")
 
-    def _should_cache(self, method: str) -> bool:
-        """判断请求是否应该被缓存"""
-        return method.upper() in self.cacheable_methods
+    def _should_cache_response(self, result: Any) -> bool:
+        """判断响应是否应该被缓存（子类可重写或通过参数覆盖）"""
+        # 优先使用用户传入的自定义函数
+        if self._should_cache_response_func is not None:
+            try:
+                return self._should_cache_response_func(result)
+            except Exception as e:
+                logger.error(f"Custom should_cache_response_func failed: {e}, using default logic")
+
+        # 使用默认逻辑
+        return self.default_cache_response_check(result)
+
+    def default_cache_response_check(self, result: Any) -> bool:
+        """默认的响应缓存判断逻辑（子类可重写）"""
+        if isinstance(result, dict):
+            return result.get("result") is True
+        return True  # 默认缓存所有响应
+
+    def _extract_cache_relevant_headers(self, headers: dict) -> dict:
+        """提取影响缓存的关键 headers（子类可重写）"""
+        relevant_keys = {"Accept-Language", "Accept", "Content-Type"}
+        return {k: v for k, v in headers.items() if k in relevant_keys}
 
     def _get_cache_key(self, request_data: dict) -> str | None:
         """为请求生成缓存键"""
@@ -305,17 +330,22 @@ class CacheClientMixin:
             return None
 
         method = request_data.get("method", "GET").upper()
-        if not self._should_cache(method):
+
+        if method not in self.cacheable_methods:
             return None
 
-        endpoint = request_data.get("endpoint", "")
-        request_kwargs = {
-            k: v for k, v in request_data.items() if k not in ("method", "endpoint", "cache", "cache_expire")
-        }
+        # 排除缓存控制参数
+        exclude_keys = {"method", "endpoint", "cache", "cache_expire", "headers"}
+        request_kwargs = {k: v for k, v in request_data.items() if k not in exclude_keys}
+
+        # 提取影响响应的关键 headers
+        if "headers" in request_data:
+            cache_relevant_headers = self._extract_cache_relevant_headers(request_data["headers"])
+            if cache_relevant_headers:
+                request_kwargs["_headers"] = cache_relevant_headers
 
         return _generate_cache_key(
-            base_url=self.base_url,
-            endpoint=endpoint,
+            url=self.url,
             method=method,
             request_kwargs=request_kwargs,
             user_identifier=self._user_identifier,
@@ -323,9 +353,8 @@ class CacheClientMixin:
 
     def _process_single_request(self, request_data: dict, is_async: bool = False) -> Any:
         """处理带缓存的单个请求"""
-        # 检查是否启用缓存
-        use_cache = request_data.get("cache", True) if isinstance(request_data, dict) else True
-        if not use_cache:
+
+        if not self.enable_cache:
             return self._original_request(request_data, is_async)
 
         # 获取缓存键
@@ -342,11 +371,10 @@ class CacheClientMixin:
         logger.debug(f"Cache MISS for {request_data.get('endpoint')}")
         result = self._original_request(request_data, is_async)
 
-        # 缓存成功响应
-        if not is_async and isinstance(result, dict) and result.get("result") is True:
-            expire = request_data.get("cache_expire", self._cache_expire)
+        # 缓存响应（可通过钩子方法自定义缓存条件）
+        if not is_async and self._should_cache_response(result):
             try:
-                self.cache_backend.set(cache_key, result, expire=expire)
+                self.cache_backend.set(cache_key, result, expire=self._cache_expire)
             except Exception as e:
                 logger.error(f"Failed to cache response: {e}")
 
@@ -356,10 +384,83 @@ class CacheClientMixin:
         """带缓存的请求处理"""
         # 处理批量请求
         if isinstance(request_data, list):
-            return [self._process_single_request(item, is_async) for item in request_data]
+            return self._process_batch_requests_with_cache(request_data, is_async)
 
         # 处理单个请求
         return self._process_single_request(request_data, is_async)
+
+    def _process_batch_requests_with_cache(self, request_list: list[dict], is_async: bool = False) -> list[Any]:
+        """
+        批量请求的缓存处理
+
+        执行流程:
+            1. 遍历请求列表，检查每个请求的缓存状态
+            2. 缓存命中的直接记录结果
+            3. 缓存未命中的收集起来，调用 _original_request 执行（复用 BaseClient 的异步执行器）
+            4. 对执行结果逐个进行缓存
+            5. 合并结果并保持原始顺序
+        """
+        results: list[Any] = [None] * len(request_list)
+        cache_miss_indices: list[int] = []
+        cache_miss_requests: list[dict] = []
+
+        # 步骤1: 检查缓存状态
+        for i, request_data in enumerate(request_list):
+            if not self.enable_cache:
+                cache_miss_indices.append(i)
+                cache_miss_requests.append(request_data)
+                continue
+
+            cache_key = self._get_cache_key(request_data)
+            if not cache_key:
+                cache_miss_indices.append(i)
+                cache_miss_requests.append(request_data)
+                continue
+
+            # 尝试获取缓存
+            cached = self.cache_backend.get(cache_key)
+            if cached is not None:
+                logger.info(f"Cache HIT for {request_data.get('endpoint')}")
+                results[i] = cached
+            else:
+                logger.debug(f"Cache MISS for {request_data.get('endpoint')}")
+                cache_miss_indices.append(i)
+                cache_miss_requests.append(request_data)
+
+        # 步骤2: 对未命中的请求调用原始方法执行（复用 BaseClient 的异步执行器）
+        if cache_miss_requests:
+            executed_results = self._original_request(cache_miss_requests, is_async)
+
+            # 步骤3: 缓存结果并填充到对应位置
+            for idx, result in zip(cache_miss_indices, executed_results):
+                results[idx] = result
+
+                # 缓存响应（异常不缓存）
+                if not isinstance(result, Exception) and self._should_cache_response(result):
+                    request_data = cache_miss_requests[cache_miss_indices.index(idx)]
+                    cache_key = self._get_cache_key(request_data)
+                    if cache_key:
+                        try:
+                            self.cache_backend.set(cache_key, result, expire=self._cache_expire)
+                        except Exception as e:
+                            logger.error(f"Failed to cache response: {e}")
+
+        return results
+
+    def _refresh_single_request(self, request_data: dict, is_async: bool) -> Any:
+        """刷新单个请求的缓存"""
+        result = self._original_request(request_data, is_async)
+
+        if isinstance(request_data, dict):
+            cache_key = self._get_cache_key(request_data)
+            if cache_key and not is_async and self._should_cache_response(result):
+                expire = request_data.get("cache_expire", self._cache_expire)
+                try:
+                    self.cache_backend.set(cache_key, result, expire=expire)
+                    logger.info(f"Cache refreshed for {request_data.get('endpoint')}")
+                except Exception as e:
+                    logger.error(f"Failed to refresh cache: {e}")
+        return result
 
     def _uncached_request(
         self,
@@ -368,26 +469,14 @@ class CacheClientMixin:
         is_async: bool = False,
     ) -> Any:
         """绕过缓存的请求处理"""
-        # 完全绕过缓存
         if mode == "cacheless":
             return self._original_request(request_data, is_async)
 
-        # 刷新缓存模式
         if mode == "refresh":
-            # 执行原始请求
-            result = self._original_request(request_data, is_async)
-
-            # 更新缓存
-            if isinstance(request_data, dict):
-                cache_key = self._get_cache_key(request_data)
-                if cache_key and not is_async:
-                    expire = request_data.get("cache_expire", self._cache_expire)
-                    try:
-                        self.cache_backend.set(cache_key, result, expire=expire)
-                        logger.info(f"Cache refreshed for {request_data.get('endpoint')}")
-                    except Exception as e:
-                        logger.error(f"Failed to refresh cache: {e}")
-            return result
+            # 处理批量请求
+            if isinstance(request_data, list):
+                return [self._refresh_single_request(item, is_async) for item in request_data]
+            return self._refresh_single_request(request_data, is_async)
 
         logger.error(f"Invalid cache mode: {mode}")
         return self._original_request(request_data, is_async)
@@ -398,12 +487,16 @@ class CacheClientMixin:
             return
 
         try:
-            # Redis 支持模式删除
+            # Redis 支持模式删除，使用 SCAN 代替 KEYS 避免阻塞
             if isinstance(self.cache_backend, RedisCacheBackend) and pattern:
-                keys = self.cache_backend.client.keys(pattern)
-                if keys:
-                    self.cache_backend.client.delete(*keys)
-                    logger.info(f"Cleared cache keys matching: {pattern}")
+                cursor = 0
+                while True:
+                    cursor, keys = self.cache_backend.client.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        self.cache_backend.client.delete(*keys)
+                    if cursor == 0:
+                        break
+                logger.info(f"Cleared cache keys matching: {pattern}")
             else:
                 self.cache_backend.clear()
                 logger.info("Cache cleared")
@@ -412,12 +505,21 @@ class CacheClientMixin:
 
     def disable_cache(self):
         """临时禁用缓存"""
+        if not hasattr(self, "_original_request"):
+            logger.warning("Cache was not enabled during initialization")
+            return
+
         self._cache_enabled = False
-        if hasattr(self, "_original_request"):
-            self.request = self._original_request
+        self.request = self._original_request
+        logger.info("Cache disabled")
 
     def enable_cache(self):
         """启用缓存"""
+        if not hasattr(self, "_original_request"):
+            logger.warning("Cache was not enabled during initialization, enabling now")
+            self._wrap_request_methods()
+            return
+
         self._cache_enabled = True
-        if hasattr(self, "_original_request"):
-            self.request = self._cached_request
+        self.request = self._cached_request
+        logger.info("Cache enabled")
