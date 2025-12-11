@@ -25,7 +25,6 @@ from rest_framework import serializers
 # 类型别名定义
 RequestConfig: TypeAlias = dict[str, Any]
 ResponseDict: TypeAlias = dict[str, Any]
-RequestDataType: TypeAlias = RequestConfig | list[RequestConfig] | None
 
 from http_client.constants import (
     DEFAULT_MAX_WORKERS,
@@ -107,7 +106,7 @@ class _RequestMethodDescriptor:
         # 情况2: 类调用（MyClient.request()）
         # 返回一个包装函数，自动创建临时实例并执行
         def class_method_wrapper(
-            request_data: RequestDataType = None,
+            request_data: RequestConfig = None,
             is_async: bool = False,
             **client_kwargs,
         ) -> ResponseDict | list[ResponseDict | Exception]:
@@ -244,7 +243,8 @@ class BaseClient:
 
     def __init__(
         self,
-        default_headers: dict[str, str] | None = None,
+        url: str = None,
+        headers: dict[str, str] | None = None,
         timeout: int | None = None,
         verify: bool | None = None,
         enable_retry: bool | None = None,
@@ -291,12 +291,13 @@ class BaseClient:
         """
         # ========== 步骤1: 验证并规范化 base_url ==========
         self.base_url = self.base_url.rstrip("/") if self.base_url else ""
-        if not self.base_url:
-            raise APIClientValidationError("base_url must be provided as a class attribute.")
+        if not url and not self.base_url:
+            raise APIClientValidationError("base_url or url must be provided as a class attribute.")
 
         # 保存类级别的默认端点和方法，用于后续请求时的默认值
         self._class_default_endpoint = self.endpoint
         self._class_default_method = self.method.upper()
+        self.url = url or self._build_url(self.endpoint)
 
         # ========== 步骤2: 初始化实例级别的配置参数 ==========
         self.timeout = timeout if timeout is not None else self.default_timeout
@@ -330,7 +331,7 @@ class BaseClient:
         # ========== 步骤4: 合并请求头配置 ==========
         # 合并顺序：类级别默认请求头 -> 实例级别请求头 -> kwargs 中的请求头
         # 后者会覆盖前者，实现灵活的请求头配置
-        self.session_headers = {**self.default_headers, **(default_headers or {}), **kwargs.pop("headers", {})}
+        self.session_headers = {**self.default_headers, **(headers or {})}
 
         # ========== 步骤5: 配置默认请求参数 ==========
         # 如果 kwargs 中没有显式设置 verify，则使用实例的 verify 属性
@@ -589,8 +590,7 @@ class BaseClient:
         """
         # 步骤1: 解析请求方法和端点
         method = request_config.get("method", self._class_default_method).upper()
-        endpoint = request_config.get("endpoint", self._class_default_endpoint)
-        url = self._build_url(endpoint)
+        url = self.url
 
         # 步骤2: 确定是否需要流式响应（检查解析器的 is_stream 属性）
         stream_flag = getattr(self.response_parser_instance, "is_stream", False)
@@ -786,7 +786,7 @@ class BaseClient:
 
     @_RequestMethodDescriptor
     def request(
-        self, request_data: RequestDataType = None, is_async: bool = False
+        self, request_data: RequestConfig = None, is_async: bool = False
     ) -> ResponseDict | list[ResponseDict | Exception]:
         """
         执行 HTTP 请求的统一入口方法（支持实例调用和类调用）
