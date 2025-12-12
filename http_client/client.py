@@ -34,6 +34,8 @@ from http_client.constants import (
     DEFAULT_TIMEOUT,
     LOG_FORMAT,
     RESPONSE_CODE_FORMATTING_ERROR,
+    RESPONSE_CODE_NON_HTTP_ERROR,
+    RESPONSE_CODE_UNEXPECTED_TYPE,
 )
 from http_client.exceptions import (
     APIClientError,
@@ -230,16 +232,16 @@ class BaseClient:
     # 默认格式化为 {result, code, message, data} 结构，便于统一处理
     response_formatter_class: type[BaseResponseFormatter] | BaseResponseFormatter = DefaultResponseFormatter
 
-    # 响应验证器类或实例，用于验证响应是否符合预期
-    # None 表示不进行响应验证，可设置为自定义验证器进行业务逻辑验证
-    response_validator_class: type[BaseResponseValidator] | BaseResponseValidator | None = None
-
     # 请求序列化器类或实例，用于在发送请求前验证请求参数
     # None 表示不进行请求参数验证
     # 支持两种方式定义:
     # 1. 类属性: request_serializer_class = MyRequestSerializer
     # 2. 内嵌类: 在子类中定义 class RequestSerializer(BaseRequestSerializer)
     request_serializer_class: type[BaseRequestSerializer] | BaseRequestSerializer | None = None
+
+    # 响应验证器类或实例，用于验证响应是否符合预期
+    # None 表示不进行响应验证，可设置为自定义验证器进行业务逻辑验证
+    response_validator_class: type[BaseResponseValidator] | BaseResponseValidator | None = None
 
     def __init__(
         self,
@@ -695,8 +697,98 @@ class BaseClient:
             # 步骤4: 清理临时属性，避免状态污染
             self._clear_parser_context()
 
-        # 步骤5: 使用格式化器格式化结果
-        return self._format_response(request_id, response_or_exception, request_config, parsed_data, parse_error)
+        formated_response = self.default_format_response(response_or_exception, parsed_data, parse_error)
+
+        try:
+            params = {
+                "formated_response": formated_response,
+                "parsed_data": parsed_data,
+                "request_id": request_id,
+                "request_config": request_config,
+                "response_or_exception": response_or_exception,
+                "parse_error": parse_error,
+                "base_client_instance": self,
+            }
+            return self.response_formatter_instance.format(**params)
+        except Exception as format_error:
+            logger.error(f"[{request_id}] Response formatting failed: {format_error}")
+            # 格式化失败时的降级处理
+            return {
+                "result": False,
+                "code": RESPONSE_CODE_FORMATTING_ERROR,
+                "message": f"Formatting failed: {format_error}",
+                "data": None,
+            }
+
+    def default_format_response(
+        self,
+        response_or_exception: requests.Response | APIClientError,
+        parsed_data: Any = None,
+        parse_error: Exception | None = None,
+    ) -> dict[str, Any]:
+        """
+        将HTTP响应或异常格式化为统一的标准字典结构
+
+        参数:
+            response_or_exception: 请求结果，可能是成功的Response对象或失败的APIClientError异常
+            parsed_data: 已解析的响应数据（由 response_parser 在 client 中解析）
+            parse_error: 解析过程中发生的异常（如果有）
+
+        返回值:
+            dict[str, Any]: 标准化的响应字典，包含以下字段：
+                - result (bool): 请求是否成功的标志
+                - code (int|None): HTTP状态码或错误代码
+                - message (str): 响应消息或错误描述
+                - data (Any): 解析后的响应数据或None
+
+        该方法实现完整的响应格式化流程，包含：
+        1. 初始化标准响应结构（默认失败状态）
+        2. 处理成功响应：提取状态码、使用已解析的数据
+        3. 处理解析错误：标记为失败并记录错误信息
+        4. 处理异常响应：提取错误信息和状态码
+        5. 处理异常类型：兜底处理未预期的响应类型
+        """
+        # 初始化标准响应结构，默认为失败状态
+        formatted_response: dict[str, Any] = {"result": False, "code": None, "message": "", "data": None}
+
+        if isinstance(response_or_exception, requests.Response):
+            # ========== 处理成功的HTTP响应 ==========
+            # 检查是否有解析错误
+            if parse_error:
+                # 虽然HTTP请求成功，但数据解析失败，标记为失败
+                formatted_response["result"] = False
+                formatted_response["code"] = response_or_exception.status_code
+                formatted_response["message"] = f"Parsing failed: {parse_error}"
+                formatted_response["data"] = None
+            else:
+                # HTTP请求成功且数据解析成功（或无需解析）
+                formatted_response["result"] = True
+                formatted_response["code"] = response_or_exception.status_code
+                formatted_response["message"] = "Success"
+                # 使用已解析的数据（可能为None，表示无需解析或解析器未配置）
+                formatted_response["data"] = parsed_data
+
+        elif isinstance(response_or_exception, APIClientError):
+            # ========== 处理API客户端异常 ==========
+            formatted_response["result"] = False
+            if hasattr(response_or_exception, "status_code") and response_or_exception.status_code:
+                # HTTP错误：使用响应的状态码
+                formatted_response["code"] = response_or_exception.status_code
+            else:
+                # 非HTTP错误（如网络超时、连接失败等），使用通用错误代码
+                formatted_response["code"] = RESPONSE_CODE_NON_HTTP_ERROR
+            formatted_response["message"] = str(response_or_exception)
+            formatted_response["data"] = None
+
+        else:
+            # ========== 处理未预期的响应类型（兜底逻辑） ==========
+            formatted_response["result"] = False
+            # 使用特殊错误代码标识未知类型错误
+            formatted_response["code"] = RESPONSE_CODE_UNEXPECTED_TYPE
+            formatted_response["message"] = f"Unexpected response/exception type: {type(response_or_exception)}"
+            formatted_response["data"] = None
+
+        return formatted_response
 
     def _set_parser_context(self, request_config: RequestConfig):
         """为 FileWriteResponseParser 设置上下文"""
@@ -720,25 +812,14 @@ class BaseClient:
 
         返回:
             (解析后的数据, 解析错误)
-
-        执行顺序:
-            1. 先执行响应验证（基于原始响应，如状态码验证）
-            2. 解析响应数据
-            3. 再次执行验证（基于解析后的数据，如字段验证）
         """
         try:
-            # 步骤1: 执行响应验证（验证原始响应，传入 None 作为 parsed_data）
-            if self.response_validator_instance:
-                logger.debug(f"[{request_id}] Validating raw response")
-                self.response_validator_instance.validate(self, response, None)
-                logger.debug(f"[{request_id}] Raw response validation passed")
-
-            # 步骤2: 解析响应数据
+            # 步骤1: 解析响应数据
             logger.debug(f"[{request_id}] Parsing response data")
             parsed_data = self.response_parser_instance.parse(self, response)
             logger.debug(f"[{request_id}] Response data parsed successfully")
 
-            # 步骤3: 执行解析后数据的验证
+            # 步骤2: 执行解析后数据的验证
             if self.response_validator_instance:
                 logger.debug(f"[{request_id}] Validating parsed response data")
                 self.response_validator_instance.validate(self, response, parsed_data)
@@ -748,41 +829,6 @@ class BaseClient:
         except Exception as e:
             logger.error(f"[{request_id}] Response validation/parsing failed: {e}")
             return None, e
-
-    def _format_response(
-        self,
-        request_id: str,
-        response_or_exception: requests.Response | APIClientError,
-        request_config: RequestConfig,
-        parsed_data: Any,
-        parse_error: Exception | None,
-    ) -> ResponseDict:
-        """
-        格式化响应结果
-
-        参数:
-            request_id: 请求唯一标识符
-            response_or_exception: 响应对象或异常
-            request_config: 请求配置
-            parsed_data: 解析后的数据
-            parse_error: 解析错误
-
-        返回:
-            格式化后的响应字典
-        """
-        try:
-            return self.response_formatter_instance.format(
-                self, response_or_exception, request_config, parsed_data, parse_error
-            )
-        except Exception as format_error:
-            logger.error(f"[{request_id}] Response formatting failed: {format_error}")
-            # 格式化失败时的降级处理
-            return {
-                "result": False,
-                "code": RESPONSE_CODE_FORMATTING_ERROR,
-                "message": f"Formatting failed: {format_error}",
-                "data": None,
-            }
 
     @_RequestMethodDescriptor
     def request(
