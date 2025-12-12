@@ -6,7 +6,6 @@
 """
 
 import logging
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from importlib import import_module
@@ -153,12 +152,17 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
 
     通过分布式任务队列调度 HTTP 请求，适合跨进程或跨主机的高并发场景。
 
+    执行流程:
+        1. 提交所有请求任务到 Celery 队列
+        2. 并发执行请求，每个请求由 Celery worker 处理
+        3. 收集所有结果，保持原始顺序返回
+        4. 自动处理异常，确保不会因单个请求失败而中断整体执行
+
     参数:
         celery_app: Celery 实例，默认使用 current_app
         task_name: Celery 任务名称，默认 http_client.execute_request_task
         client_kwargs: 构造客户端实例时使用的参数
         wait_timeout: 等待任务结果的超时时间（秒），None 表示不限制
-        propagate_error: 是否将任务异常原样抛出
     """
 
     def __init__(
@@ -167,7 +171,6 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
         task_name: str | None = None,
         client_kwargs: dict[str, Any] | None = None,
         wait_timeout: int | None = None,
-        propagate_error: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -175,45 +178,67 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
         self.task_name = task_name or CELERY_REQUEST_TASK_NAME
         self.client_kwargs_template = client_kwargs or {}
         self.wait_timeout = wait_timeout
-        self.propagate_error = propagate_error
 
     def execute(
         self,
         client_instance: "BaseClient",  # noqa: F821
-        request_list: list[dict[str, Any]],
-    ) -> list[dict[str, Any] | Exception]:
-        """提交任务到 Celery 并收集结果"""
-        if not request_list:
-            return []
+        validated_request_mapping: dict[str, dict],
+    ) -> list[dict]:
+        """
+        提交任务到 Celery 并收集结果
+
+        参数:
+            client_instance: 调用此执行器的 BaseClient 实例
+            validated_request_mapping: 请求配置字典，key 为 request_id，value 为请求配置
+
+        返回:
+            格式化后的响应字典列表，顺序与输入一致
+        """
+        logger.info(
+            f"Starting {len(validated_request_mapping)} asynchronous requests via Celery task '{self.task_name}'"
+        )
 
         client_path = f"{client_instance.__class__.__module__}.{client_instance.__class__.__name__}"
         client_kwargs = self._build_client_kwargs(client_instance)
 
-        logger.info(f"Dispatching {len(request_list)} requests via Celery task '{self.task_name}'")
-        async_results: list[AsyncResult] = []
-        for index, config in enumerate(request_list):
+        # 使用字典维护 async_result 与 request_id 的映射关系
+        async_result_to_request_id: dict[AsyncResult, str] = {}
+        request_id_list = list(validated_request_mapping.keys())
+
+        # 提交所有请求任务
+        for request_id, config in validated_request_mapping.items():
             payload = deepcopy(config)
-            request_id = f"CELERY-{index + 1}-{uuid.uuid4().hex[:4]}"
-            result = self.celery_app.send_task(
+            async_result = self.celery_app.send_task(
                 self.task_name,
-                args=[client_path, payload, client_kwargs, request_id],
+                args=[client_path, request_id, payload, client_kwargs],
             )
-            async_results.append(result)
+            async_result_to_request_id[async_result] = request_id
 
-        results: list[dict[str, Any] | Exception] = []
-        for index, async_result in enumerate(async_results):
+        # 收集所有任务结果，使用字典暂存
+        results_dict: dict[str, dict] = {}
+        for async_result, request_id in async_result_to_request_id.items():
             try:
-                response = async_result.get(timeout=self.wait_timeout)
-                results.append(response)
-            except CeleryTimeoutError as timeout_error:
-                logger.error(f"Celery task timeout for request {index + 1}: {timeout_error}")
-                results.append(APIClientError(f"Celery task timeout: {timeout_error}"))
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.error(f"Celery task failed for request {index + 1}: {exc}")
-                error = exc if self.propagate_error else APIClientError(f"Celery task error: {exc}")
-                results.append(error)
+                result = async_result.get(timeout=self.wait_timeout)
+                results_dict[request_id] = result
+            except CeleryTimeoutError as e:
+                logger.error(f"Request {request_id} timeout: {e}")
+                results_dict[request_id] = {
+                    "result": False,
+                    "code": RESPONSE_CODE_NON_HTTP_ERROR,
+                    "message": f"Celery task timeout: {e}",
+                    "data": None,
+                }
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error(f"Request {request_id} failed: {e}")
+                results_dict[request_id] = {
+                    "result": False,
+                    "code": RESPONSE_CODE_NON_HTTP_ERROR,
+                    "message": f"Celery task error: {e}",
+                    "data": None,
+                }
 
-        return results
+        # 按原始顺序返回结果
+        return [results_dict[request_id] for request_id in request_id_list]
 
     def _build_client_kwargs(self, client_instance: "BaseClient") -> dict[str, Any]:  # noqa: F821
         """从客户端实例中提取可序列化的初始化参数"""
