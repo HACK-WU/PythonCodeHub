@@ -12,8 +12,10 @@ HTTP 客户端核心模块
 创建时间: 2025/7/24 23:36
 """
 
+import copy
 import logging
 import uuid
+import time
 from typing import Any, TypeAlias
 
 import requests
@@ -21,6 +23,7 @@ from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
 from urllib3.util.retry import Retry
 from rest_framework import serializers
+
 
 # 类型别名定义
 RequestConfig: TypeAlias = dict[str, Any]
@@ -316,7 +319,7 @@ class BaseClient:
         self.auth_instance = self._resolve_authentication(authentication)
 
         # 解析异步执行器：用于并发请求的执行
-        self.executor_instance = self._resolve_executor(executor)
+        self.async_executor_instance = self._resolve_async_executor(executor)
 
         # 解析响应解析器：用于解析 HTTP 响应内容（如 JSON、XML 等）
         self.response_parser_instance = self._resolve_response_parser(response_parser)
@@ -346,6 +349,23 @@ class BaseClient:
         # ========== 步骤6: 创建并配置 requests.Session 对象 ==========
         # Session 对象用于连接池管理和持久化配置（如 cookies、认证等）
         self.session = self._create_session()
+
+        # 默认不启用缓存。
+        # 继承CacheClientMixin后，会自动启用缓存
+        self.enable_cache = False
+        self.user_identifier = None
+        self.cache_key_prefix = ""
+        # request_id -> request_config
+        self.request_mapping = {}
+
+    # 继承CacheClientMixin后，会重写_get_cache_key方法
+    def _get_cache_key(self, request_config, **kwargs) -> str | None:
+        """
+        获取缓存键
+        """
+        if self.enable_cache:
+            raise NotImplementedError
+        return None
 
     def _resolve_component(self, component, class_attr_name, base_class, fallback_class, **init_kwargs):
         """
@@ -400,7 +420,9 @@ class BaseClient:
         """
         return self._resolve_component(authentication, "authentication_class", AuthBase, fallback_class=None)
 
-    def _resolve_executor(self, executor: BaseAsyncExecutor | type[BaseAsyncExecutor] | None) -> BaseAsyncExecutor:
+    def _resolve_async_executor(
+        self, executor: BaseAsyncExecutor | type[BaseAsyncExecutor] | None
+    ) -> BaseAsyncExecutor:
         """
         解析异步执行器配置，返回执行器实例
 
@@ -514,8 +536,10 @@ class BaseClient:
         if self.request_serializer_instance is None:
             return request_config
 
-        validated_config = self.request_serializer_instance.validate(request_config)
-        return validated_config
+        if isinstance(request_config, list):
+            return [self._validate_request(config) for config in request_config]
+
+        return self.request_serializer_instance.validate(request_config)
 
     def _merge_config(self, base_config: dict, override_config: dict | None, **extra_updates) -> dict:
         """
@@ -700,16 +724,24 @@ class BaseClient:
         formated_response = self.default_format_response(response_or_exception, parsed_data, parse_error)
 
         try:
-            params = {
-                "formated_response": formated_response,
-                "parsed_data": parsed_data,
-                "request_id": request_id,
-                "request_config": request_config,
-                "response_or_exception": response_or_exception,
-                "parse_error": parse_error,
-                "base_client_instance": self,
-            }
-            return self.response_formatter_instance.format(**params)
+            formated_response = self.response_formatter_instance.format(
+                **{
+                    "formated_response": formated_response,
+                    "parsed_data": parsed_data,
+                    "request_id": request_id,
+                    "request_config": request_config,
+                    "response_or_exception": response_or_exception,
+                    "parse_error": parse_error,
+                    "base_client_instance": self,
+                }
+            )
+            # 如果启用了缓存，则添加缓存键
+            if self.enable_cache and self.request_mapping.get(request_id):
+                cache_key = self._get_cache_key(self.request_mapping[request_id])
+                if cache_key is not None:
+                    formated_response["cache_key"] = f"{self.cache_key_prefix}_{cache_key}"
+
+            return formated_response
         except Exception as format_error:
             logger.error(f"[{request_id}] Response formatting failed: {format_error}")
             # 格式化失败时的降级处理
@@ -719,6 +751,15 @@ class BaseClient:
                 "message": f"Formatting failed: {format_error}",
                 "data": None,
             }
+
+    def generate_request_id(self, suffix=None) -> str:
+        """生成全局唯一的请求 ID"""
+        if suffix is not None:
+            suffix = str(suffix)
+
+        timestamp = int(time.time() * 1000)  # 毫秒级时间戳
+        short_uuid = uuid.uuid4().hex[:8]
+        return f"REQ-{timestamp}-{short_uuid}-{suffix}"
 
     def default_format_response(
         self,
@@ -883,15 +924,19 @@ class BaseClient:
         异常:
             APIClientValidationError: 当 request_data 类型无效时抛出
         """
-        # 处理单个请求
-        if request_data is None or isinstance(request_data, dict):
-            return self._execute_single_request(request_data or {})
+        try:
+            # 处理单个请求
+            if request_data is None or isinstance(request_data, dict):
+                return self._execute_single_request(request_data or {})
 
-        # 处理批量请求
-        if isinstance(request_data, list):
-            return self._execute_batch_requests(request_data, is_async)
+            # 处理批量请求
+            if isinstance(request_data, list):
+                return self._execute_batch_requests(request_data, is_async)
 
-        raise APIClientValidationError("request_data must be a dictionary or a list of dictionaries")
+            raise APIClientValidationError("request_data must be a dictionary or a list of dictionaries")
+        finally:
+            # 清空请求映射
+            self.request_mapping = {}
 
     def _execute_single_request(self, request_config: RequestConfig) -> ResponseDict:
         """
@@ -908,7 +953,9 @@ class BaseClient:
             2. 使用序列化器验证请求参数（如果配置了序列化器）
             3. 执行 HTTP 请求并格式化结果
         """
-        request_id = f"REQ-{uuid.uuid4().hex[:8]}"
+        request_id = self.generate_request_id()
+        if self.enable_cache:
+            self.request_mapping[request_id] = copy.deepcopy(request_config)
 
         # 验证请求参数
         validated_config = self._validate_request(request_config)
@@ -932,15 +979,22 @@ class BaseClient:
             logger.warning("Empty request list provided")
             return []
 
-        request_list = self._validate_request(request_list)
+        validated_request_mapping = {}
+        for i, request_config in enumerate(request_list):
+            request_id = self.generate_request_id(i)
+            if self.enable_cache:
+                self.request_mapping[request_id] = copy.deepcopy(request_config)
+            validated_request_mapping[request_id] = self._validate_request(request_config)
 
         return (
-            self.executor_instance.execute(self, request_list)
+            self.async_executor_instance.execute(self, validated_request_mapping)
             if is_async
-            else self._execute_sync_requests(request_list)
+            else self._execute_sync_requests(validated_request_mapping)
         )
 
-    def _execute_sync_requests(self, request_list: list[RequestConfig]) -> list[ResponseDict | Exception]:
+    def _execute_sync_requests(
+        self, validated_request_mapping: dict[str, RequestConfig]
+    ) -> list[ResponseDict | Exception]:
         """
         同步顺序执行多个请求
 
@@ -956,10 +1010,10 @@ class BaseClient:
             3. 顺序调用 _make_request_and_format
             4. 收集所有结果并返回
         """
-        logger.info(f"Starting {len(request_list)} synchronous requests")
+        logger.info(f"Starting {len(validated_request_mapping)} synchronous requests")
         return [
-            self._make_request_and_format(f"SYNC-{i + 1}-{uuid.uuid4().hex[:8]}", config)
-            for i, config in enumerate(request_list)
+            self._make_request_and_format(request_id, request_data)
+            for request_id, request_data in validated_request_mapping.items()
         ]
 
     def close(self):

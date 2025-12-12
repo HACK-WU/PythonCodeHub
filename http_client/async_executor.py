@@ -7,7 +7,7 @@
 
 import logging
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from copy import deepcopy
 from importlib import import_module
 from typing import Any
@@ -16,7 +16,7 @@ from celery import Celery, current_app, shared_task
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.result import AsyncResult
 
-from http_client.constants import LOG_FORMAT
+from http_client.constants import LOG_FORMAT, RESPONSE_CODE_NON_HTTP_ERROR
 from http_client.exceptions import APIClientError
 
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
@@ -64,7 +64,7 @@ class BaseAsyncExecutor:
     def execute(
         self,
         client_instance: "BaseClient",  # noqa: F821
-        request_list: list[dict[str, Any]],
+        validated_request_mapping: dict[str, dict],
     ) -> list[dict[str, Any] | Exception]:
         """
         执行多个请求
@@ -93,56 +93,58 @@ class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
         4. 自动处理异常，确保不会因单个请求失败而中断整体执行
     """
 
-    def execute(self, client_instance: "BaseClient", request_list: list[dict]) -> list[dict]:  # noqa: F821
+    def execute(self, client_instance: "BaseClient", validated_request_mapping: dict[str, dict]) -> list[dict]:  # noqa: F821
         """
         使用线程池异步执行多个请求
 
         参数:
             client_instance: 调用此执行器的 BaseClient 实例
-            request_list: 请求配置列表
+            validated_request_mapping: 请求配置字典，key 为 request_id，value 为请求配置
 
         返回:
-            格式化后的响应字典或异常的列表，顺序与输入一致
-
-        执行步骤:
-            1. 初始化结果列表，预分配空间
-            2. 创建线程池，提交所有请求任务
-            3. 等待所有任务完成，收集结果
-            4. 处理异常情况，确保返回完整结果
+            格式化后的响应字典列表，顺序与输入一致
         """
-        logger.info(f"Starting {len(request_list)} asynchronous requests with {self.max_workers} workers")
-
-        # 初始化结果列表，保持与请求列表相同的顺序
-        results: list[dict[str, Any] | Exception | None] = [None] * len(request_list)
-        futures: dict[Future, int] = {}
+        logger.info(f"Starting {len(validated_request_mapping)} asynchronous requests with {self.max_workers} workers")
 
         # 确定实际使用的工作线程数
         executor_max_workers = self.max_workers if self.max_workers is not None else client_instance.max_workers
 
+        # 使用字典维护 future 与 request_id 的映射关系
+        future_to_request_id: dict = {}
+        request_id_list = list(validated_request_mapping.keys())
+
         with ThreadPoolExecutor(max_workers=executor_max_workers, **self.executor_kwargs) as executor:
             # 提交所有请求任务
-            for i, config in enumerate(request_list):
-                request_id = f"ASYNC-{i + 1}-{uuid.uuid4().hex[:4]}"
-                # 直接调用 _make_request_and_format 方法，返回格式化后的数据
+            for request_id, config in validated_request_mapping.items():
                 future = executor.submit(client_instance._make_request_and_format, request_id, config)
-                futures[future] = i
+                future_to_request_id[future] = request_id
 
-            # 收集所有任务结果
-            for future in as_completed(futures):
-                index = futures[future]
+            # 收集所有任务结果，使用字典暂存
+            results_dict: dict[str, dict] = {}
+            for future in as_completed(future_to_request_id):
+                request_id = future_to_request_id[future]
                 try:
-                    result = future.result()  # 获取格式化后的数据
-                    results[index] = result
+                    result = future.result()
+                    results_dict[request_id] = result
                 except APIClientError as e:
-                    # 捕获客户端错误
-                    logger.error(f"Async request {index + 1} failed: {e}")
-                    results[index] = e
+                    logger.error(f"Request {request_id} failed: {e}")
+                    results_dict[request_id] = {
+                        "result": False,
+                        "code": getattr(e, "status_code", RESPONSE_CODE_NON_HTTP_ERROR),
+                        "message": str(e),
+                        "data": None,
+                    }
                 except Exception as e:
-                    # 捕获其他意外错误
-                    logger.error(f"Unexpected error in async request {index + 1}: {e}")
-                    results[index] = APIClientError(f"Unexpected error: {e}")
+                    logger.error(f"Request {request_id} unexpected error: {e}")
+                    results_dict[request_id] = {
+                        "result": False,
+                        "code": RESPONSE_CODE_NON_HTTP_ERROR,
+                        "message": f"Unexpected error: {str(e)}",
+                        "data": None,
+                    }
 
-        return results  # type: ignore
+        # 按原始顺序返回结果
+        return [results_dict[request_id] for request_id in request_id_list]
 
 
 class CeleryAsyncExecutor(BaseAsyncExecutor):
