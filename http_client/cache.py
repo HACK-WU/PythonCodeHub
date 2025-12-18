@@ -27,6 +27,7 @@ from http_client.constants import (
     REDIS_DEFAULT_PORT,
     REDIS_MAX_CONNECTIONS,
 )
+from http_client.client import BaseClient
 
 logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
@@ -221,7 +222,7 @@ def generate_cache_key(
     return hashlib.blake2b(key_str.encode("utf-8"), digest_size=16).hexdigest()
 
 
-class CacheClientMixin:
+class CacheClient(BaseClient):
     """
     缓存客户端混入类
 
@@ -268,6 +269,7 @@ class CacheClientMixin:
         if self.is_user_specific is True and user_identifier is None:
             raise ValueError("User identifier is required for user-specific caching")
 
+        self._original_request = None
         # 包装请求方法
         self._wrap_request_methods()
 
@@ -316,7 +318,7 @@ class CacheClientMixin:
         relevant_keys = {"Accept-Language", "Accept", "Content-Type"}
         return {k: v for k, v in headers.items() if k in relevant_keys}
 
-    def _get_cache_key(self, request_data: dict) -> str | None:
+    def _get_cache_key(self, request_data: dict, **kwargs) -> str | None:
         """为请求生成缓存键"""
         if not isinstance(request_data, dict):
             return None
@@ -454,6 +456,7 @@ class CacheClientMixin:
             cache_key = result.pop("cache_key", None)
             if cache_key and self._should_cache_response(result):
                 try:
+                    cache_key = str(cache_key)
                     self.cache_backend.set(cache_key, result, expire=self._cache_expire)
                 except Exception as e:
                     logger.error(f"Failed to refresh cache: {e}")
