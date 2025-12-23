@@ -881,7 +881,7 @@ class BaseClient:
         try:
             formated_response = self.response_formatter_instance.format(
                 **{
-                    "formated_response": formated_response,
+                    "formatted_response": formated_response,
                     "parsed_data": parsed_data,
                     "request_id": request_id,
                     "request_config": request_config,
