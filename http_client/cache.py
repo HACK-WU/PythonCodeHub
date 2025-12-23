@@ -4,6 +4,8 @@
 支持灵活的缓存策略和用户级缓存隔离
 """
 
+from __future__ import annotations
+
 import abc
 import functools
 import hashlib
@@ -354,20 +356,16 @@ class CacheClient(BaseClient):
         if method not in self.cacheable_methods:
             return None
 
-        # 排除缓存控制参数
-        exclude_keys = {"method", "endpoint", "cache", "cache_expire", "headers"}
-        request_kwargs = {k: v for k, v in request_data.items() if k not in exclude_keys}
-
         # 提取影响响应的关键 headers
         if "headers" in request_data:
             cache_relevant_headers = self._extract_cache_relevant_headers(request_data["headers"])
             if cache_relevant_headers:
-                request_kwargs["_headers"] = cache_relevant_headers
+                request_data["_headers"] = cache_relevant_headers
         try:
             return generate_cache_key(
                 url=self.url,
                 method=method,
-                request_kwargs=request_kwargs,
+                request_kwargs=request_data,
                 user_identifier=self._user_identifier,
             )
         except Exception:
@@ -410,7 +408,9 @@ class CacheClient(BaseClient):
         if isinstance(request_data, list):
             return self._process_batch_requests(request_data, is_async)
 
-        # 处理单个请求
+        # 处理单个请求，None转换为空字典
+        if request_data is None:
+            request_data = {}
         return self._process_single_request(request_data, is_async)
 
     def _process_batch_requests(self, request_list: list[dict], is_async: bool = False) -> list[Any]:
@@ -498,6 +498,11 @@ class CacheClient(BaseClient):
             return self._original_request(request_data, is_async)
 
         if mode == "refresh":
+            # 处理None参数
+            if request_data is None:
+                request_data = {}
+
+            # 执行请求
             result = self._original_request(request_data, is_async)
             return self._refresh_requests(result)
 
