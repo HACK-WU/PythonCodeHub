@@ -335,11 +335,11 @@ class CacheClient(BaseClient):
         # 使用默认逻辑
         return self.default_cache_response_check(result)
 
-    def default_cache_response_check(self, result: Any) -> bool:
+    def default_cache_response_check(self, result: Any, *args, **kwargs) -> bool:
         """默认的响应缓存判断逻辑（子类可重写）"""
-        if isinstance(result, dict):
-            return result.get("result") is True
-        return True  # 默认缓存所有响应
+
+        # 默认缓存所有响应
+        return True
 
     def _extract_cache_relevant_headers(self, headers: dict) -> dict:
         """提取影响缓存的关键 headers（子类可重写）"""
