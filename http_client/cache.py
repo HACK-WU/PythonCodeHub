@@ -1,5 +1,4 @@
-"""
-缓存管理模块
+"""缓存管理模块
 
 提供多种缓存后端实现（内存缓存、Redis 缓存）和缓存客户端混入类
 支持灵活的缓存策略和用户级缓存隔离
@@ -21,7 +20,6 @@ from http_client.constants import (
     CACHEABLE_METHODS,
     DEFAULT_CACHE_EXPIRE,
     DEFAULT_CACHE_MAXSIZE,
-    LOG_FORMAT,
     REDIS_DEFAULT_DB,
     REDIS_DEFAULT_HOST,
     REDIS_DEFAULT_PORT,
@@ -29,7 +27,6 @@ from http_client.constants import (
 )
 from http_client.client import BaseClient
 
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 
@@ -83,6 +80,10 @@ class InMemoryCacheBackend(BaseCacheBackend):
             # 更新访问顺序
             self.cache.move_to_end(key)
             logger.debug(f"InMemoryCache hit for key: {key}")
+
+            # 在 get 操作时也触发惰性清理，清理部分过期项
+            self._lazy_cleanup()
+
             return value
 
     def set(self, key: str, value: Any, expire: int | None = None) -> None:
@@ -112,6 +113,31 @@ class InMemoryCacheBackend(BaseCacheBackend):
         with self.lock:
             self.cache.clear()
             logger.debug("InMemoryCache cleared")
+
+    def _lazy_cleanup(self) -> None:
+        """惰性清理过期缓存项，避免内存泄漏"""
+        if len(self.cache) == 0:
+            return
+
+        current_time = time.time()
+        # 批量清理过期项，最多清理 10% 的缓存或 10 个项目
+        max_cleanup = max(1, min(10, len(self.cache) // 10))
+        cleanup_count = 0
+
+        # 从最旧的项开始检查
+        keys_to_delete = []
+        for key, (_, expire_at) in self.cache.items():
+            if cleanup_count >= max_cleanup:
+                break
+            if expire_at is not None and current_time >= expire_at:
+                keys_to_delete.append(key)
+                cleanup_count += 1
+
+        for key in keys_to_delete:
+            del self.cache[key]
+
+        if keys_to_delete:
+            logger.debug(f"InMemoryCache lazy cleanup removed {len(keys_to_delete)} expired items")
 
 
 class RedisCacheBackend(BaseCacheBackend):
@@ -162,8 +188,8 @@ class RedisCacheBackend(BaseCacheBackend):
                     return value
             logger.debug(f"RedisCache miss for key: {key}")
             return None
-        except redis.RedisError as e:
-            logger.error(f"Redis error getting key '{key}': {e}")
+        except redis.RedisError:
+            logger.exception(f"Redis error getting key '{key}'")
             return None
 
     def set(self, key: str, value: Any, expire: int | None = None) -> None:
@@ -178,22 +204,22 @@ class RedisCacheBackend(BaseCacheBackend):
                 self.client.set(key, value)
 
             logger.debug(f"RedisCache set for key: {key}, expire: {expire}")
-        except (TypeError, redis.RedisError) as e:
-            logger.error(f"Redis error setting key '{key}': {e}")
+        except (TypeError, redis.RedisError):
+            logger.exception(f"Redis error setting key '{key}'")
 
     def delete(self, key: str) -> None:
         try:
             self.client.delete(key)
             logger.debug(f"RedisCache deleted key: {key}")
-        except redis.RedisError as e:
-            logger.error(f"Redis error deleting key '{key}': {e}")
+        except redis.RedisError:
+            logger.exception(f"Redis error deleting key '{key}'")
 
     def clear(self) -> None:
         try:
             self.client.flushdb()
             logger.debug("RedisCache cleared (current DB)")
-        except redis.RedisError as e:
-            logger.error(f"Redis error clearing cache: {e}")
+        except redis.RedisError:
+            logger.exception("Redis error clearing cache")
 
 
 def generate_cache_key(
@@ -278,8 +304,8 @@ class CacheClient(BaseClient):
         backend_kwargs = getattr(self, "cache_backend_kwargs", {})
         try:
             return self.cache_backend_class(**backend_kwargs)
-        except Exception as e:
-            logger.error(f"Failed to initialize cache backend: {e}")
+        except Exception:
+            logger.exception("Failed to initialize cache backend")
             # 回退到内存缓存
             return InMemoryCacheBackend()
 
@@ -301,8 +327,8 @@ class CacheClient(BaseClient):
         if self._should_cache_response_func is not None:
             try:
                 return self._should_cache_response_func(result)
-            except Exception as e:
-                logger.error(f"Custom should_cache_response_func failed: {e}, using default logic")
+            except Exception:
+                logger.exception("Custom should_cache_response_func failed, using default logic")
 
         # 使用默认逻辑
         return self.default_cache_response_check(result)
@@ -344,8 +370,8 @@ class CacheClient(BaseClient):
                 request_kwargs=request_kwargs,
                 user_identifier=self._user_identifier,
             )
-        except Exception as e:
-            logger.error(f"Failed to generate cache key: {e}")
+        except Exception:
+            logger.exception("Failed to generate cache key")
             return None
 
     def _process_single_request(self, request_data: dict, is_async: bool = False) -> Any:
@@ -363,8 +389,8 @@ class CacheClient(BaseClient):
             cached = self.cache_backend.get(cache_key)
             if cached is not None:
                 return cached
-        except Exception as e:
-            logger.error(f"Failed to get cache: {e}")
+        except Exception:
+            logger.exception("Failed to get cache")
 
         # 缓存未命中，执行请求
         logger.debug(f"Cache MISS for {request_data.get('endpoint')}")
@@ -373,8 +399,8 @@ class CacheClient(BaseClient):
         if self._should_cache_response(result):
             try:
                 self.cache_backend.set(cache_key, result, expire=self._cache_expire)
-            except Exception as e:
-                logger.error(f"Failed to cache response: {e}")
+            except Exception:
+                logger.exception("Failed to cache response")
 
         return result
 
@@ -411,8 +437,8 @@ class CacheClient(BaseClient):
             try:
                 # 尝试获取缓存
                 cached = self.cache_backend.get(cache_key)
-            except Exception as e:
-                logger.error(f"Failed to get cache: {e}")
+            except Exception:
+                logger.exception("Failed to get cache")
                 cached = None
 
             if cached is None:
@@ -438,8 +464,8 @@ class CacheClient(BaseClient):
                 if cache_key and self._should_cache_response(result):
                     try:
                         self.cache_backend.set(cache_key, result, expire=self._cache_expire)
-                    except Exception as e:
-                        logger.error(f"Failed to cache response: {e}")
+                    except Exception:
+                        logger.exception("Failed to cache response")
 
         return results
 
@@ -458,8 +484,8 @@ class CacheClient(BaseClient):
                 try:
                     cache_key = str(cache_key)
                     self.cache_backend.set(cache_key, result, expire=self._cache_expire)
-                except Exception as e:
-                    logger.error(f"Failed to refresh cache: {e}")
+                except Exception:
+                    logger.exception("Failed to refresh cache")
 
     def _uncached_request(
         self,
@@ -497,5 +523,5 @@ class CacheClient(BaseClient):
             else:
                 self.cache_backend.clear()
                 logger.info("Cache cleared")
-        except Exception as e:
-            logger.error(f"Cache clear failed: {e}")
+        except Exception:
+            logger.exception("Cache clear failed")
