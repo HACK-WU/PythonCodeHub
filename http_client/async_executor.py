@@ -1,9 +1,10 @@
-"""
-异步执行器模块
+"""异步执行器模块
 
 提供多种异步执行策略，用于并发执行多个 HTTP 请求
 当前支持线程池执行方式
 """
+
+from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,10 +16,9 @@ from celery import Celery, current_app, shared_task
 from celery.exceptions import TimeoutError as CeleryTimeoutError
 from celery.result import AsyncResult
 
-from http_client.constants import LOG_FORMAT, RESPONSE_CODE_NON_HTTP_ERROR
+from http_client.constants import RESPONSE_CODE_NON_HTTP_ERROR
 from http_client.exceptions import APIClientError
 
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 
@@ -27,7 +27,7 @@ CELERY_REQUEST_TASK_NAME = "http_client.execute_request_task"
 
 @shared_task(name=CELERY_REQUEST_TASK_NAME, bind=True)
 def execute_request_task(
-    self, client_path: str, request_config: dict[str, Any], client_kwargs: dict[str, Any] | None = None
+    self, client_path: str, request_id: str, request_config: dict[str, Any], client_kwargs: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """使用 Celery 执行单个请求"""
     module_name, class_name = client_path.rsplit(".", 1)
@@ -62,7 +62,7 @@ class BaseAsyncExecutor:
 
     def execute(
         self,
-        client_instance: "BaseClient",  # noqa: F821
+        client_instance: BaseClient,  # noqa: F821
         validated_request_mapping: dict[str, dict],
     ) -> list[dict[str, Any] | Exception]:
         """
@@ -92,7 +92,7 @@ class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
         4. 自动处理异常，确保不会因单个请求失败而中断整体执行
     """
 
-    def execute(self, client_instance: "BaseClient", validated_request_mapping: dict[str, dict]) -> list[dict]:  # noqa: F821
+    def execute(self, client_instance: BaseClient, validated_request_mapping: dict[str, dict]) -> list[dict]:  # noqa: F821
         """
         使用线程池异步执行多个请求
 
@@ -126,7 +126,7 @@ class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
                     result = future.result()
                     results_dict[request_id] = result
                 except APIClientError as e:
-                    logger.error(f"Request {request_id} failed: {e}")
+                    logger.exception(f"Request {request_id} failed with APIClientError")
                     results_dict[request_id] = {
                         "result": False,
                         "code": getattr(e, "status_code", RESPONSE_CODE_NON_HTTP_ERROR),
@@ -134,7 +134,7 @@ class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
                         "data": None,
                     }
                 except Exception as e:
-                    logger.error(f"Request {request_id} unexpected error: {e}")
+                    logger.exception(f"Request {request_id} failed with unexpected error")
                     results_dict[request_id] = {
                         "result": False,
                         "code": RESPONSE_CODE_NON_HTTP_ERROR,
@@ -181,7 +181,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
 
     def execute(
         self,
-        client_instance: "BaseClient",  # noqa: F821
+        client_instance: BaseClient,  # noqa: F821
         validated_request_mapping: dict[str, dict],
     ) -> list[dict]:
         """
@@ -221,7 +221,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
                 result = async_result.get(timeout=self.wait_timeout)
                 results_dict[request_id] = result
             except CeleryTimeoutError as e:
-                logger.error(f"Request {request_id} timeout: {e}")
+                logger.exception(f"Request {request_id} timeout")
                 results_dict[request_id] = {
                     "result": False,
                     "code": RESPONSE_CODE_NON_HTTP_ERROR,
@@ -229,7 +229,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
                     "data": None,
                 }
             except Exception as e:  # pylint: disable=broad-except
-                logger.error(f"Request {request_id} failed: {e}")
+                logger.exception(f"Request {request_id} failed")
                 results_dict[request_id] = {
                     "result": False,
                     "code": RESPONSE_CODE_NON_HTTP_ERROR,
@@ -240,7 +240,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
         # 按原始顺序返回结果
         return [results_dict[request_id] for request_id in request_id_list]
 
-    def _build_client_kwargs(self, client_instance: "BaseClient") -> dict[str, Any]:  # noqa: F821
+    def _build_client_kwargs(self, client_instance: BaseClient) -> dict[str, Any]:  # noqa: F821
         """从客户端实例中提取可序列化的初始化参数"""
         if self.client_kwargs_template:
             return deepcopy(self.client_kwargs_template)
@@ -250,7 +250,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
             "timeout": getattr(client_instance, "timeout", None),
             "verify": getattr(client_instance, "verify", None),
             "enable_retry": getattr(client_instance, "enable_retry", None),
-            "retries": getattr(client_instance, "retries", None),
+            "max_retries": getattr(client_instance, "max_retries", None),
             "max_workers": getattr(client_instance, "max_workers", None),
             "retry_config": deepcopy(getattr(client_instance, "retry_config", {})),
             "pool_config": deepcopy(getattr(client_instance, "pool_config", {})),
