@@ -377,7 +377,7 @@ class BaseClient:
         # 继承CacheClientMixin后，会自动启用缓存
         self.enable_cache = False
         self.user_identifier = None
-        self.cache_key_prefix = ""
+        self.cache_key_prefix: str | callable = ""
         # request_id -> request_config
         self.request_mapping = {}
 
@@ -881,7 +881,7 @@ class BaseClient:
         try:
             formated_response = self.response_formatter_instance.format(
                 **{
-                    "formatted_response": formated_response,
+                    "formated_response": formated_response,
                     "parsed_data": parsed_data,
                     "request_id": request_id,
                     "request_config": request_config,
@@ -891,10 +891,10 @@ class BaseClient:
                 }
             )
             # 如果启用了缓存，则添加缓存键
-            if self.enable_cache and self.request_mapping.get(request_id):
+            if self.enable_cache and self.request_mapping.get(request_id) is not None:
                 cache_key = self._get_cache_key(self.request_mapping[request_id])
                 if cache_key is not None:
-                    formated_response["cache_key"] = f"{self.cache_key_prefix}_{cache_key}"
+                    formated_response["cache_key"] = cache_key
 
             return formated_response
         except Exception as format_error:
@@ -945,46 +945,46 @@ class BaseClient:
         5. 处理异常类型：兜底处理未预期的响应类型
         """
         # 初始化标准响应结构，默认为失败状态
-        formatted_response: dict[str, Any] = {"result": False, "code": None, "message": "", "data": None}
+        formated_response: dict[str, Any] = {"result": False, "code": None, "message": "", "data": None}
 
         if isinstance(response_or_exception, requests.Response):
             # ========== 处理成功的HTTP响应 ==========
             # 检查是否有解析错误
             if parse_error:
                 # 虽然HTTP请求成功，但数据解析失败，标记为失败
-                formatted_response["result"] = False
-                formatted_response["code"] = response_or_exception.status_code
-                formatted_response["message"] = f"Parsing failed: {parse_error}"
-                formatted_response["data"] = None
+                formated_response["result"] = False
+                formated_response["code"] = response_or_exception.status_code
+                formated_response["message"] = f"Parsing failed: {parse_error}"
+                formated_response["data"] = None
             else:
                 # HTTP请求成功且数据解析成功（或无需解析）
-                formatted_response["result"] = True
-                formatted_response["code"] = response_or_exception.status_code
-                formatted_response["message"] = "Success"
+                formated_response["result"] = True
+                formated_response["code"] = response_or_exception.status_code
+                formated_response["message"] = "Success"
                 # 使用已解析的数据（可能为None，表示无需解析或解析器未配置）
-                formatted_response["data"] = parsed_data
+                formated_response["data"] = parsed_data
 
         elif isinstance(response_or_exception, APIClientError):
             # ========== 处理API客户端异常 ==========
-            formatted_response["result"] = False
+            formated_response["result"] = False
             if hasattr(response_or_exception, "status_code") and response_or_exception.status_code:
                 # HTTP错误：使用响应的状态码
-                formatted_response["code"] = response_or_exception.status_code
+                formated_response["code"] = response_or_exception.status_code
             else:
                 # 非HTTP错误（如网络超时、连接失败等），使用通用错误代码
-                formatted_response["code"] = RESPONSE_CODE_NON_HTTP_ERROR
-            formatted_response["message"] = str(response_or_exception)
-            formatted_response["data"] = None
+                formated_response["code"] = RESPONSE_CODE_NON_HTTP_ERROR
+            formated_response["message"] = str(response_or_exception)
+            formated_response["data"] = None
 
         else:
             # ========== 处理未预期的响应类型（兜底逻辑） ==========
-            formatted_response["result"] = False
+            formated_response["result"] = False
             # 使用特殊错误代码标识未知类型错误
-            formatted_response["code"] = RESPONSE_CODE_UNEXPECTED_TYPE
-            formatted_response["message"] = f"Unexpected response/exception type: {type(response_or_exception)}"
-            formatted_response["data"] = None
+            formated_response["code"] = RESPONSE_CODE_UNEXPECTED_TYPE
+            formated_response["message"] = f"Unexpected response/exception type: {type(response_or_exception)}"
+            formated_response["data"] = None
 
-        return formatted_response
+        return formated_response
 
     def _set_parser_context(self, request_config: RequestConfig):
         """为 FileWriteResponseParser 设置上下文"""

@@ -252,23 +252,13 @@ def generate_cache_key(
 
 class CacheClient(BaseClient):
     """
-    缓存客户端混入类
+    缓存客户端
 
     为 API 客户端提供透明的缓存功能，支持：
     - 自动缓存 GET/HEAD 请求
     - 用户级缓存隔离
     - 灵活的缓存后端（内存/Redis）
     - 缓存刷新和清除
-
-    使用方式：
-        class MyAPIClient(BaseClient, CacheClientMixin):
-            pass
-
-    类属性:
-        cache_backend_class: 缓存后端类
-        default_cache_expire: 默认缓存过期时间（秒）
-        cacheable_methods: 可缓存的 HTTP 方法集合
-        is_user_specific: 是否启用用户级缓存隔离
     """
 
     cache_backend_class: type[BaseCacheBackend] = InMemoryCacheBackend
@@ -291,6 +281,9 @@ class CacheClient(BaseClient):
         self._cache_expire = cache_expire or self.default_cache_expire
         self._user_identifier = user_identifier
         self._should_cache_response_func = should_cache_response_func
+
+        # 规范化缓存键前缀
+        self.cache_key_prefix = self._normalize_cache_key_prefix(self.cache_key_prefix)
         # 初始化缓存后端
         self.cache_backend = self._init_cache_backend()
 
@@ -310,6 +303,26 @@ class CacheClient(BaseClient):
             logger.exception("Failed to initialize cache backend")
             # 回退到内存缓存
             return InMemoryCacheBackend()
+
+    def _normalize_cache_key_prefix(self, prefix: Any) -> str:
+        """规范化缓存键前缀"""
+        if not prefix:
+            return ""
+
+        try:
+            # 如果是可调用对象，先执行获取结果
+            if callable(prefix):
+                prefix = prefix()
+
+            # 转换为字符串
+            if not isinstance(prefix, str):
+                prefix = str(prefix)
+
+            return prefix.strip()
+
+        except Exception as e:
+            logger.error(f"Failed to normalize cache key prefix: {e}")
+            return ""
 
     def _wrap_request_methods(self):
         """包装请求方法以支持缓存"""
@@ -362,12 +375,15 @@ class CacheClient(BaseClient):
             if cache_relevant_headers:
                 request_data["_headers"] = cache_relevant_headers
         try:
-            return generate_cache_key(
+            cache_key = generate_cache_key(
                 url=self.url,
                 method=method,
                 request_kwargs=request_data,
                 user_identifier=self._user_identifier,
             )
+            if self.cache_key_prefix:
+                return f"{self.cache_key_prefix}_{cache_key}"
+            return cache_key
         except Exception:
             logger.exception("Failed to generate cache key")
             return None
@@ -504,7 +520,8 @@ class CacheClient(BaseClient):
 
             # 执行请求
             result = self._original_request(request_data, is_async)
-            return self._refresh_requests(result)
+            self._refresh_requests(result)
+            return result
 
         logger.error(f"Invalid cache mode: {mode}")
         return self._original_request(request_data, is_async)
