@@ -225,19 +225,11 @@ class RedisCacheBackend(BaseCacheBackend):
 
 
 def generate_cache_key(
-    url: str, method: str, request_kwargs: dict[str, Any], user_identifier: str | None = None
+    url: str, method: str, request_data: dict[str, Any], headers: dict, user_identifier: str | None = None
 ) -> str:
     """生成稳定的缓存键"""
     # 创建请求信息的精简表示
-    key_data = {
-        "url": url,
-        "method": method.upper(),
-    }
-
-    # 添加影响响应的关键参数
-    for k in ["params", "data", "json"]:
-        if request_kwargs.get(k):
-            key_data[k] = request_kwargs[k]
+    key_data = {"url": url, "method": method.upper(), "headers": headers, "request_data": request_data}
 
     # 包含用户标识
     if user_identifier:
@@ -360,32 +352,37 @@ class CacheClient(BaseClient):
         return {k: v for k, v in headers.items() if k in relevant_keys}
 
     def _get_cache_key(self, request_data: dict, **kwargs) -> str | None:
-        """为请求生成缓存键"""
+        """为请求生成缓存键
+
+        参数:
+            request_data: 请求配置字典,包含 method、endpoint、params、data、json、headers 等字段
+
+        返回:
+            缓存键字符串,如果不应该缓存则返回 None
+        """
         if not isinstance(request_data, dict):
             return None
 
-        method = request_data.get("method", "GET").upper()
+        # 从请求配置中获取 method,如果未指定则使用类默认方法
+        method = self._class_default_method
 
         if method not in self.cacheable_methods:
             return None
+        cache_relevant_headers = self._extract_cache_relevant_headers(self.session.headers)
 
-        # 提取影响响应的关键 headers
-        if "headers" in request_data:
-            cache_relevant_headers = self._extract_cache_relevant_headers(request_data["headers"])
-            if cache_relevant_headers:
-                request_data["_headers"] = cache_relevant_headers
         try:
             cache_key = generate_cache_key(
                 url=self.url,
                 method=method,
-                request_kwargs=request_data,
+                request_data=cache_relevant_headers,
+                headers=request_data,
                 user_identifier=self._user_identifier,
             )
             if self.cache_key_prefix:
                 return f"{self.cache_key_prefix}_{cache_key}"
             return cache_key
-        except Exception:
-            logger.exception("Failed to generate cache key")
+        except Exception as e:
+            logger.exception(f"Failed to generate cache key,{e}")
             return None
 
     def _process_single_request(self, request_data: dict, is_async: bool = False) -> Any:

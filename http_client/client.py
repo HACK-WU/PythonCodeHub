@@ -26,7 +26,7 @@ from rest_framework import serializers
 
 
 # 类型别名定义
-RequestConfig: TypeAlias = dict[str, Any]
+RequestData: TypeAlias = dict[str, Any]
 ResponseDict: TypeAlias = dict[str, Any]
 
 from http_client.constants import (
@@ -109,7 +109,7 @@ class _RequestMethodDescriptor:
         # 情况2: 类调用（MyClient.request()）
         # 返回一个包装函数，自动创建临时实例并执行
         def class_method_wrapper(
-            request_data: RequestConfig = None,
+            request_data: RequestData = None,
             is_async: bool = False,
             **client_kwargs,
         ) -> ResponseDict | list[ResponseDict | Exception]:
@@ -361,11 +361,7 @@ class BaseClient:
         # 后者会覆盖前者，实现灵活的请求头配置
         self.session_headers = {**self.default_headers, **(headers or {})}
 
-        # ========== 步骤5: 配置默认请求参数 ==========
-        # 如果 kwargs 中没有显式设置 verify，则使用实例的 verify 属性
-        # 这确保 SSL 验证配置能够传递到每个请求中
-        if "verify" not in kwargs:
-            kwargs["verify"] = self.verify
+        # ========== 步骤5: 配置默认请求参数 =========
         # 保存所有额外的请求参数（如 proxies、cert 等），用于每次请求时合并
         self.default_request_kwargs = kwargs
 
@@ -378,7 +374,7 @@ class BaseClient:
         self.enable_cache = False
         self.user_identifier = None
         self.cache_key_prefix: str | callable = ""
-        # request_id -> request_config
+        # request_id -> request_data
         self.request_mapping = {}
 
         # ========== 步骤7: 初始化线程安全相关的锁 ==========
@@ -400,7 +396,7 @@ class BaseClient:
         }
 
     # 继承CacheClientMixin后，会重写_get_cache_key方法
-    def _get_cache_key(self, request_config, **kwargs) -> str | None:
+    def _get_cache_key(self, request_data, **kwargs) -> str | None:
         """
         获取缓存键
         """
@@ -426,7 +422,7 @@ class BaseClient:
         self._hooks[hook_name].append(callback)
         logger.debug(f"Registered hook: {hook_name}")
 
-    def before_request(self, request_id: str, request_config: RequestConfig) -> RequestConfig:
+    def before_request(self, request_id: str, request_data: RequestData) -> RequestData:
         """
         请求发送前的钩子方法
 
@@ -437,7 +433,7 @@ class BaseClient:
 
         参数:
             request_id: 请求唯一标识符
-            request_config: 请求配置字典
+            request_data: 请求配置字典
 
         返回:
             修改后的请求配置字典
@@ -445,10 +441,10 @@ class BaseClient:
         # 执行所有注册的 before_request 钩子
         for hook in self._hooks["before_request"]:
             try:
-                request_config = hook(self, request_id, request_config)
-            except Exception:
-                logger.exception(f"[{request_id}] before_request hook failed")
-        return request_config
+                request_data = hook(self, request_id, request_data)
+            except Exception as e:
+                logger.exception(f"[{request_id}] before_request hook failed,{e}")
+        return request_data
 
     def after_request(self, request_id: str, response: requests.Response) -> requests.Response:
         """
@@ -644,15 +640,13 @@ class BaseClient:
 
         return None
 
-    def _validate_request(
-        self, request_config: RequestConfig | list[RequestConfig]
-    ) -> RequestConfig | list[RequestConfig]:
+    def _validate_request(self, request_data: RequestData | list[RequestData]) -> RequestData | list[RequestData]:
         """
         使用序列化器验证请求参数
 
         参数:
             request_id: 请求唯一标识符
-            request_config: 请求配置字典
+            request_data: 请求配置字典
 
         返回:
             验证并可能转换后的请求配置
@@ -661,12 +655,12 @@ class BaseClient:
             APIClientRequestValidationError: 当验证失败时抛出
         """
         if self.request_serializer_instance is None:
-            return request_config
+            return request_data
 
-        if isinstance(request_config, list):
-            return [self._validate_request(config) for config in request_config]
+        if isinstance(request_data, list):
+            return [self._validate_request(config) for config in request_data]
 
-        return self.request_serializer_instance.validate(request_config)
+        return self.request_serializer_instance.validate(request_data)
 
     def _merge_config(self, base_config: dict, override_config: dict | None, **extra_updates) -> dict:
         """
@@ -716,13 +710,13 @@ class BaseClient:
             session.mount("https://", adapter)
         return session
 
-    def _make_request(self, request_id: str, request_config: RequestConfig) -> requests.Response:
+    def _make_request(self, request_id: str, request_data: RequestData) -> requests.Response:
         """
         执行单个 HTTP 请求，返回原始 Response 对象
 
         参数:
             request_id: 请求唯一标识符，用于日志追踪
-            request_config: 请求配置字典，包含 method、endpoint、params 等
+            request_data: 请求配置字典，包含 method、endpoint、params 等
 
         返回:
             requests.Response 对象
@@ -744,19 +738,15 @@ class BaseClient:
             APIClientNetworkError: 网络连接错误
         """
         # 步骤0: 调用 before_request 钩子
-        request_config = self.before_request(request_id, request_config)
+        request_data = self.before_request(request_id, request_data)
 
-        # 步骤1: 解析请求方法和端点
-        method = request_config.get("method", self._class_default_method).upper()
+        method = self._class_default_method
         url = self.url
 
-        # 步骤2: 确定是否需要流式响应（检查解析器的 is_stream 属性）
-        stream_flag = getattr(self.response_parser_instance, "is_stream", False)
+        # 构建请求参数字典
+        request_config = self._build_request_config(request_data)
 
-        # 步骤3: 构建请求参数字典
-        request_kwargs = self._build_request_kwargs(request_config, stream_flag)
-
-        # 步骤4: 记录请求开始日志
+        # 记录请求开始日志
         # INFO 级别：记录请求的基本信息（方法和 URL），生产环境可见
         if self.enable_sanitization:
             from http_client.utils import sanitize_url
@@ -771,18 +761,18 @@ class BaseClient:
             if self.enable_sanitization:
                 from http_client.utils import sanitize_dict, sanitize_headers
 
-                safe_kwargs = sanitize_dict(request_kwargs.copy(), self.sensitive_params)
-                if "headers" in safe_kwargs:
-                    safe_kwargs["headers"] = sanitize_headers(safe_kwargs["headers"], self.sensitive_headers)
+                safe_kwargs = sanitize_dict(request_config.copy(), self.sensitive_params)
+                if self.session.headers:
+                    safe_kwargs["headers"] = sanitize_headers(self.session.headers, self.sensitive_headers)
                 logger.debug(f"[{request_id}] Request kwargs: {safe_kwargs}")
             else:
-                logger.debug(f"[{request_id}] Request kwargs: {request_kwargs}")
+                logger.debug(f"[{request_id}] Request kwargs: {request_config}")
 
         try:
             with self._session_lock:
-                response = self.session.request(method=method, url=url, timeout=self.timeout, **request_kwargs)
+                response = self.session.request(**request_config)
 
-            # 步骤5: 调用 after_request 钩子
+            # 调用 after_request 钩子
             response = self.after_request(request_id, response)
 
             logger.info(f"[{request_id}] Received {response.status_code} response")
@@ -823,28 +813,43 @@ class BaseClient:
         """
         return f"{self.base_url}/{endpoint.lstrip('/')}" if endpoint else self.base_url
 
-    def _build_request_kwargs(self, request_config: RequestConfig, stream: bool) -> dict[str, Any]:
+    def _build_request_config(self, request_data: RequestData) -> dict[str, Any]:
         """
         构建请求参数字典
-
-        参数:
-            request_config: 请求配置字典
-            stream: 是否使用流式响应
-
-        返回:
-            合并后的请求参数字典
         """
-        # 过滤掉 method 和 endpoint，其他配置都传递给 requests
-        config_kwargs = {k: v for k, v in request_config.items() if k not in ("method", "endpoint")}
-        return {**self.default_request_kwargs, "stream": stream, **config_kwargs}
+        method = self._class_default_method
+        url = self.url
+        stream_flag = getattr(self.response_parser_instance, "is_stream", False)
 
-    def _make_request_and_format(self, request_id: str, request_config: RequestConfig) -> ResponseDict:
+        # 基础请求参数
+        request_kwargs = {
+            **self.default_request_kwargs,
+            "method": method,
+            "url": url,
+            "stream": stream_flag,
+            "timeout": self.timeout,
+            "verify": self.verify,
+        }
+
+        # 处理请求数据：根据 HTTP 方法和数据类型智能选择参数位置
+        if request_data:
+            # 根据 HTTP 方法自动选择参数位置
+            if method in ("GET", "DELETE", "HEAD", "OPTIONS"):
+                # 查询参数方法：数据放在 URL 参数中
+                request_kwargs["params"] = request_data
+            elif method in ("POST", "PUT", "PATCH"):
+                # 请求体方法：默认使用 JSON 格式
+                request_kwargs["json"] = request_data
+
+        return request_kwargs
+
+    def _make_request_and_format(self, request_id: str, request_data: RequestData) -> ResponseDict:
         """
         执行请求、解析响应并格式化结果的完整流程
 
         参数:
             request_id: 请求唯一标识符
-            request_config: 请求配置字典
+            request_data: 请求配置字典
 
         返回:
             格式化后的响应字典，包含 result、code、message、data 字段
@@ -858,14 +863,14 @@ class BaseClient:
             6. 处理格式化失败的情况，返回降级响应
         """
         # 步骤1: 为 FileWriteResponseParser 传递文件名
-        self._set_parser_context(request_config)
+        self._set_parser_context(request_data)
 
         # 步骤2: 执行请求并捕获响应或异常
         parsed_data: Any = None
         parse_error: Exception | None = None
 
         try:
-            response = self._make_request(request_id, request_config)
+            response = self._make_request(request_id, request_data)
             response_or_exception = response
 
             # 步骤3: 解析响应数据（仅在请求成功时）
@@ -884,7 +889,7 @@ class BaseClient:
                     "formated_response": formated_response,
                     "parsed_data": parsed_data,
                     "request_id": request_id,
-                    "request_config": request_config,
+                    "request_data": request_data,
                     "response_or_exception": response_or_exception,
                     "parse_error": parse_error,
                     "base_client_instance": self,
@@ -986,10 +991,10 @@ class BaseClient:
 
         return formated_response
 
-    def _set_parser_context(self, request_config: RequestConfig):
+    def _set_parser_context(self, request_data: RequestData):
         """为 FileWriteResponseParser 设置上下文"""
         parser = self.response_parser_instance
-        if isinstance(parser, FileWriteResponseParser) and (filename := request_config.get("filename")):
+        if isinstance(parser, FileWriteResponseParser) and (filename := request_data.get("filename")):
             parser._current_filename = filename
 
     def _clear_parser_context(self):
@@ -1028,7 +1033,7 @@ class BaseClient:
 
     @_RequestMethodDescriptor
     def request(
-        self, request_data: RequestConfig = None, is_async: bool = False
+        self, request_data: RequestData = None, is_async: bool = False
     ) -> ResponseDict | list[ResponseDict | Exception]:
         """
         执行 HTTP 请求的统一入口方法（支持实例调用和类调用）
@@ -1094,12 +1099,12 @@ class BaseClient:
             with self._request_mapping_lock:
                 self.request_mapping = {}
 
-    def _execute_single_request(self, request_config: RequestConfig) -> ResponseDict:
+    def _execute_single_request(self, request_data: RequestData) -> ResponseDict:
         """
         执行单个请求
 
         参数:
-            request_config: 请求配置字典
+            request_data: 请求配置字典
 
         返回:
             格式化后的响应字典
@@ -1112,15 +1117,15 @@ class BaseClient:
         request_id = self.generate_request_id()
         if self.enable_cache:
             with self._request_mapping_lock:
-                self.request_mapping[request_id] = copy.deepcopy(request_config)
+                self.request_mapping[request_id] = copy.deepcopy(request_data)
 
         # 验证请求参数
-        validated_config = self._validate_request(request_config)
+        validated_config = self._validate_request(request_data)
 
         return self._make_request_and_format(request_id, validated_config)
 
     def _execute_batch_requests(
-        self, request_list: list[RequestConfig], is_async: bool
+        self, request_list: list[RequestData], is_async: bool
     ) -> list[ResponseDict | Exception]:
         """
         执行批量请求
@@ -1137,12 +1142,12 @@ class BaseClient:
             return []
 
         validated_request_mapping = {}
-        for i, request_config in enumerate(request_list):
+        for i, request_data in enumerate(request_list):
             request_id = self.generate_request_id(i)
             if self.enable_cache:
                 with self._request_mapping_lock:
-                    self.request_mapping[request_id] = copy.deepcopy(request_config)
-            validated_request_mapping[request_id] = self._validate_request(request_config)
+                    self.request_mapping[request_id] = copy.deepcopy(request_data)
+            validated_request_mapping[request_id] = self._validate_request(request_data)
 
         return (
             self.async_executor_instance.execute(self, validated_request_mapping)
@@ -1151,7 +1156,7 @@ class BaseClient:
         )
 
     def _execute_sync_requests(
-        self, validated_request_mapping: dict[str, RequestConfig]
+        self, validated_request_mapping: dict[str, RequestData]
     ) -> list[ResponseDict | Exception]:
         """
         同步顺序执行多个请求
@@ -1278,15 +1283,13 @@ class DRFClient(BaseClient):
             f"request_serializer must be a DRF Serializer class or instance, got {type(source).__name__}"
         )
 
-    def _validate_request(
-        self, request_config: RequestConfig | list[RequestConfig]
-    ) -> RequestConfig | list[RequestConfig]:
+    def _validate_request(self, request_data: RequestData | list[RequestData]) -> RequestData | list[RequestData]:
         """
         使用 DRF 序列化器验证请求参数
 
         参数:
             request_id: 请求唯一标识符
-            request_config: 请求配置字典或字典列表
+            request_data: 请求配置字典或字典列表
 
         返回:
             验证并转换后的请求配置
@@ -1295,15 +1298,15 @@ class DRFClient(BaseClient):
             APIClientRequestValidationError: 当验证失败时抛出
         """
         if self.request_serializer_instance is None:
-            return request_config
+            return request_data
 
         # 判断是否为列表，使用 many=True 进行批量验证
-        is_many = isinstance(request_config, list)
-        serializer = self.request_serializer_instance(data=request_config, many=is_many)
+        is_many = isinstance(request_data, list)
+        serializer = self.request_serializer_instance(data=request_data, many=is_many)
 
         if not serializer.is_valid():
             raise APIClientRequestValidationError("请求参数验证失败", errors=serializer.errors)
 
-        request_config = serializer.data
+        request_data = serializer.data
 
-        return request_config
+        return request_data
