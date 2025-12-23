@@ -1,5 +1,4 @@
-"""
-HTTP 客户端核心模块
+"""HTTP 客户端核心模块
 
 提供灵活、可扩展的 HTTP 客户端基类，支持：
 - 自定义认证机制
@@ -16,6 +15,7 @@ import copy
 import logging
 import uuid
 import time
+import threading
 from typing import Any, TypeAlias
 
 import requests
@@ -35,7 +35,6 @@ from http_client.constants import (
     DEFAULT_RETRIES,
     DEFAULT_RETRY_CONFIG,
     DEFAULT_TIMEOUT,
-    LOG_FORMAT,
     RESPONSE_CODE_FORMATTING_ERROR,
     RESPONSE_CODE_NON_HTTP_ERROR,
     RESPONSE_CODE_UNEXPECTED_TYPE,
@@ -60,7 +59,6 @@ from http_client.serializer import BaseRequestSerializer
 from http_client.validator import BaseResponseValidator
 
 # 配置日志
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 
@@ -185,8 +183,31 @@ class BaseClient:
     # 默认 HTTP 请求方法，支持 GET/POST/PUT/DELETE/PATCH 等标准方法
     method: str = "GET"
 
-    # SSL 证书验证开关，False 表示不验证证书（适用于开发环境或自签名证书）
-    verify: bool = False
+    # SSL 证书验证开关，True 表示验证证书（生产环境推荐），False 表示不验证（仅用于开发环境或自签名证书）
+    verify: bool = True
+
+    # ========== 安全性配置 ==========
+    # 敏感请求头名称集合，这些头在日志中会被脱敏
+    sensitive_headers: set[str] = {
+        "Authorization",
+        "Cookie",
+        "X-API-Key",
+        "X-Auth-Token",
+        "X-Access-Token",
+    }
+
+    # 敏感 URL 参数名称集合，这些参数在日志中会被脱敏
+    sensitive_params: set[str] = {
+        "token",
+        "password",
+        "secret",
+        "key",
+        "api_key",
+        "access_token",
+    }
+
+    # 是否启用敏感信息脱敏，默认启用以提高安全性
+    enable_sanitization: bool = True
 
     # ========== 超时和重试配置 ==========
     # 默认请求超时时间（秒），防止请求无限期挂起
@@ -195,8 +216,8 @@ class BaseClient:
     # 是否启用重试机制，默认不启用
     enable_retry: bool = False
 
-    # 默认失败重试次数，0 表示不重试，适用于幂等性请求
-    default_retries: int = DEFAULT_RETRIES
+    # 默认最大重试次数，0 表示不重试，适用于幂等性请求
+    max_retries: int = DEFAULT_RETRIES
 
     # 重试策略配置字典，包含重试次数、退避因子、状态码列表等详细配置
     # 可在子类或实例化时覆盖，支持精细化控制重试行为
@@ -253,7 +274,7 @@ class BaseClient:
         timeout: int | None = None,
         verify: bool | None = None,
         enable_retry: bool | None = None,
-        retries: int | None = None,
+        max_retries: int | None = None,
         max_workers: int | None = None,
         retry_config: dict[str, Any] | None = None,
         pool_config: dict[str, Any] | None = None,
@@ -271,11 +292,12 @@ class BaseClient:
         参数:
             default_headers: 默认请求头字典
             timeout: 请求超时时间（秒）
-            retries: 失败重试次数
+            max_retries: 最大重试次数
+            retries: (废弃) 使用 max_retries 替代
             max_workers: 异步执行的最大工作线程数
             retry_config: 重试策略配置字典（覆盖类级别配置）
             pool_config: 连接池配置字典（覆盖类级别配置）
-            verify: SSL 证书验证开关（None 时使用类属性，默认 False）
+            verify: SSL 证书验证开关（None 时使用类属性，默认 True）
             authentication: 认证类或实例
             executor: 异步执行器类或实例
             response_parser: 响应解析器类或实例
@@ -294,6 +316,7 @@ class BaseClient:
         异常:
             APIClientValidationError: 当 base_url 未设置或配置无效时抛出
         """
+
         # ========== 步骤1: 验证并规范化 base_url ==========
         self.base_url = self.base_url.rstrip("/") if self.base_url else ""
         if not url and not self.base_url:
@@ -307,12 +330,12 @@ class BaseClient:
         # ========== 步骤2: 初始化实例级别的配置参数 ==========
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.enable_retry = enable_retry if enable_retry is not None else self.enable_retry
-        self.retries = retries if retries is not None else self.default_retries
+        self.max_retries = max_retries if max_retries is not None else self.max_retries
         self.verify = verify if verify is not None else self.verify
         self.max_workers = max_workers if max_workers is not None else self.max_workers
 
         # 合并重试策略和连接池配置
-        self.retry_config = self._merge_config(self.retry_config, retry_config, retries_override=retries)
+        self.retry_config = self._merge_config(self.retry_config, retry_config, max_retries_override=max_retries)
         self.pool_config = self._merge_config(self.pool_config, pool_config)
 
         # ========== 步骤3: 解析并初始化各个组件实例 ==========
@@ -358,6 +381,24 @@ class BaseClient:
         # request_id -> request_config
         self.request_mapping = {}
 
+        # ========== 步骤7: 初始化线程安全相关的锁 ==========
+        # 为关键共享状态添加线程锁，支持多线程并发使用
+        self._request_mapping_lock = threading.RLock()
+        self._session_lock = threading.RLock()
+
+        # ========== 步骤8: 初始化流式响应追踪 ==========
+        # 用于追踪未关闭的流式响应，防止资源泄漏
+        self._stream_responses = []
+        self._stream_responses_lock = threading.RLock()
+
+        # ========== 步骤9: 初始化请求钩子 ==========
+        # 用于存储注册的钩子函数，支持请求前后的自定义处理
+        self._hooks = {
+            "before_request": [],
+            "after_request": [],
+            "on_request_error": [],
+        }
+
     # 继承CacheClientMixin后，会重写_get_cache_key方法
     def _get_cache_key(self, request_config, **kwargs) -> str | None:
         """
@@ -366,6 +407,92 @@ class BaseClient:
         if self.enable_cache:
             raise NotImplementedError
         return None
+
+    # ========== 钩子机制 ==========
+
+    def register_hook(self, hook_name: str, callback: callable) -> None:
+        """
+        注册钩子函数
+
+        参数:
+            hook_name: 钩子名称，可选值："before_request", "after_request", "on_request_error"
+            callback: 钩子回调函数
+
+        异常:
+            ValueError: 当钩子名称不合法时抛出
+        """
+        if hook_name not in self._hooks:
+            raise ValueError(f"Invalid hook name: {hook_name}. Must be one of: {list(self._hooks.keys())}")
+        self._hooks[hook_name].append(callback)
+        logger.debug(f"Registered hook: {hook_name}")
+
+    def before_request(self, request_id: str, request_config: RequestConfig) -> RequestConfig:
+        """
+        请求发送前的钩子方法
+
+        子类可以重写此方法以实现自定义逻辑，例如：
+        - 添加请求签名
+        - 修改请求头
+        - 记录请求日志
+
+        参数:
+            request_id: 请求唯一标识符
+            request_config: 请求配置字典
+
+        返回:
+            修改后的请求配置字典
+        """
+        # 执行所有注册的 before_request 钩子
+        for hook in self._hooks["before_request"]:
+            try:
+                request_config = hook(self, request_id, request_config)
+            except Exception:
+                logger.exception(f"[{request_id}] before_request hook failed")
+        return request_config
+
+    def after_request(self, request_id: str, response: requests.Response) -> requests.Response:
+        """
+        请求成功后的钩子方法
+
+        子类可以重写此方法以实现自定义逻辑，例如：
+        - 记录响应日志
+        - 统计响应时间
+        - 处理响应头
+
+        参数:
+            request_id: 请求唯一标识符
+            response: HTTP 响应对象
+
+        返回:
+            修改后的响应对象
+        """
+        # 执行所有注册的 after_request 钩子
+        for hook in self._hooks["after_request"]:
+            try:
+                response = hook(self, request_id, response)
+            except Exception:
+                logger.exception(f"[{request_id}] after_request hook failed")
+        return response
+
+    def on_request_error(self, request_id: str, error: Exception) -> None:
+        """
+        请求失败时的钩子方法
+
+        子类可以重写此方法以实现自定义逻辑，例如：
+        - 记录错误日志
+        - 发送告警
+        - 收集错误指标
+
+        参数:
+            request_id: 请求唯一标识符
+            error: 异常对象
+        """
+        # 执行所有注册的 on_request_error 钩子
+        for hook in self._hooks["on_request_error"]:
+            try:
+                hook(self, request_id, error)
+            except Exception:
+                logger.exception(f"[{request_id}] on_request_error hook failed")
 
     def _resolve_component(self, component, class_attr_name, base_class, fallback_class, **init_kwargs):
         """
@@ -548,7 +675,7 @@ class BaseClient:
         参数:
             base_config: 基础配置（类级别）
             override_config: 覆盖配置（实例级别）
-            **extra_updates: 额外的更新项（如 retries_override）
+            **extra_updates: 额外的更新项（如 max_retries_override）
 
         返回:
             合并后的配置字典
@@ -556,8 +683,8 @@ class BaseClient:
         merged = {**base_config, **(override_config or {})}
 
         # 处理特殊更新逻辑
-        if retries_override := extra_updates.get("retries_override"):
-            merged["total"] = retries_override
+        if max_retries_override := extra_updates.get("max_retries_override"):
+            merged["total"] = max_retries_override
 
         return merged
 
@@ -580,7 +707,7 @@ class BaseClient:
         if self.auth_instance:
             session.auth = self.auth_instance
 
-        if self.enable_retry and self.retries > 0:
+        if self.enable_retry and self.max_retries > 0:
             # 使用配置字典创建重试策略
             retry_strategy = Retry(**self.retry_config)
             # 使用配置字典创建 HTTP 适配器
@@ -601,19 +728,24 @@ class BaseClient:
             requests.Response 对象
 
         执行步骤:
-            1. 从配置中提取 HTTP 方法和端点路径
-            2. 构建完整的请求 URL
-            3. 根据解析器配置决定是否使用流式响应
-            4. 合并默认参数和请求特定参数
-            5. 执行 HTTP 请求
-            6. 检查响应状态码，抛出 HTTP 错误
-            7. 捕获并转换各类异常为自定义异常
+            1. 调用 before_request 钩子
+            2. 从配置中提取 HTTP 方法和端点路径
+            3. 构建完整的请求 URL
+            4. 根据解析器配置决定是否使用流式响应
+            5. 合并默认参数和请求特定参数
+            6. 执行 HTTP 请求
+            7. 调用 after_request 钩子
+            8. 检查响应状态码，抛出 HTTP 错误
+            9. 捕获并转换各类异常为自定义异常
 
         异常:
             APIClientTimeoutError: 请求超时
             APIClientHTTPError: HTTP 错误响应（4xx, 5xx）
             APIClientNetworkError: 网络连接错误
         """
+        # 步骤0: 调用 before_request 钩子
+        request_config = self.before_request(request_id, request_config)
+
         # 步骤1: 解析请求方法和端点
         method = request_config.get("method", self._class_default_method).upper()
         url = self.url
@@ -626,13 +758,33 @@ class BaseClient:
 
         # 步骤4: 记录请求开始日志
         # INFO 级别：记录请求的基本信息（方法和 URL），生产环境可见
-        logger.info(f"[{request_id}] Starting {method} request to {url}")
+        if self.enable_sanitization:
+            from http_client.utils import sanitize_url
+
+            safe_url = sanitize_url(url, self.sensitive_params)
+        else:
+            safe_url = url
+        logger.info(f"[{request_id}] Starting {method} request to {safe_url}")
 
         # DEBUG 级别：记录完整的请求参数（包含 headers、params 等），仅调试时可见
-        logger.debug(f"[{request_id}] Request kwargs: {request_kwargs}")
+        if logger.isEnabledFor(logging.DEBUG):
+            if self.enable_sanitization:
+                from http_client.utils import sanitize_dict, sanitize_headers
+
+                safe_kwargs = sanitize_dict(request_kwargs.copy(), self.sensitive_params)
+                if "headers" in safe_kwargs:
+                    safe_kwargs["headers"] = sanitize_headers(safe_kwargs["headers"], self.sensitive_headers)
+                logger.debug(f"[{request_id}] Request kwargs: {safe_kwargs}")
+            else:
+                logger.debug(f"[{request_id}] Request kwargs: {request_kwargs}")
 
         try:
-            response = self.session.request(method=method, url=url, timeout=self.timeout, **request_kwargs)
+            with self._session_lock:
+                response = self.session.request(method=method, url=url, timeout=self.timeout, **request_kwargs)
+
+            # 步骤5: 调用 after_request 钩子
+            response = self.after_request(request_id, response)
+
             logger.info(f"[{request_id}] Received {response.status_code} response")
             logger.debug(f"[{request_id}] Response headers: {response.headers}")
             response.raise_for_status()
@@ -642,6 +794,7 @@ class BaseClient:
             # 情况1: 超时异常
             error = APIClientTimeoutError(f"Request to {url} timed out after {self.timeout}s")
             logger.error(f"[{request_id}] Request failed: {error}")
+            self.on_request_error(request_id, error)
             raise error
         except requests.exceptions.HTTPError as e:
             # 情况2: HTTP 错误响应（4xx/5xx 状态码）
@@ -649,11 +802,13 @@ class BaseClient:
             reason = e.response.reason if e.response else "No response"
             error = APIClientHTTPError(f"HTTP {status_code}: {reason}", response=e.response)
             logger.error(f"[{request_id}] Request failed: {error}")
+            self.on_request_error(request_id, error)
             raise error
         except requests.exceptions.RequestException as e:
             # 情况3: 其他网络异常（连接失败、DNS 解析失败等）
             error = APIClientNetworkError(f"Request to {url} failed: {e}")
             logger.error(f"[{request_id}] Request failed: {error}")
+            self.on_request_error(request_id, error)
             raise error
 
     def _build_url(self, endpoint: str) -> str:
@@ -936,7 +1091,8 @@ class BaseClient:
             raise APIClientValidationError("request_data must be a dictionary or a list of dictionaries")
         finally:
             # 清空请求映射
-            self.request_mapping = {}
+            with self._request_mapping_lock:
+                self.request_mapping = {}
 
     def _execute_single_request(self, request_config: RequestConfig) -> ResponseDict:
         """
@@ -955,7 +1111,8 @@ class BaseClient:
         """
         request_id = self.generate_request_id()
         if self.enable_cache:
-            self.request_mapping[request_id] = copy.deepcopy(request_config)
+            with self._request_mapping_lock:
+                self.request_mapping[request_id] = copy.deepcopy(request_config)
 
         # 验证请求参数
         validated_config = self._validate_request(request_config)
@@ -983,7 +1140,8 @@ class BaseClient:
         for i, request_config in enumerate(request_list):
             request_id = self.generate_request_id(i)
             if self.enable_cache:
-                self.request_mapping[request_id] = copy.deepcopy(request_config)
+                with self._request_mapping_lock:
+                    self.request_mapping[request_id] = copy.deepcopy(request_config)
             validated_request_mapping[request_id] = self._validate_request(request_config)
 
         return (
