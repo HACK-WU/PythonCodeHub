@@ -15,14 +15,20 @@ dependencies = [
   "djangorestframework>=3.16.1",
   "inflection>=0.5.1",
   "pandas>=2.3.1",
-  "pytest>=8.4.1",
   "redis==6",
   "requests>=2.32.4",
 ]
 
 [dependency-groups]
 dev = [
+  "fakeredis>=2.33",
   "pre-commit>=4.2",
+  "pytest>=8.4.1",
+  "pytest-cov>=7",
+  "pytest-mock>=3.15.1",
+  "pytest-xdist>=3.8",
+  "requests-mock>=1.12.1",
+  "responses>=0.25.8",
   "ruff>=0.12",
 ]
 
@@ -85,11 +91,51 @@ lint.pylint.max-statements = 88 # default: 50
 ignore-words-list = "3rt,abd,aer,ans,bitap,crate,damon,fo,followings,hist,iff,kwanza,manuel,mater,secant,som,sur,tim,toi,zar"
 skip = "./.*,*.json,*.lock,ciphers/prehistoric_men.txt,project_euler/problem_022/p022_names.txt,pyproject.toml,strings/dictionary.txt,strings/words.txt"
 
-# pytest
+# pytest 配置
 
 [tool.pytest.ini_options]
+# 测试发现路径
 testpaths = [ "tests/" ]
-python_files = [ "test_*.py", "tests.py" ]
+
+# Python 文件模式
+python_files = [ "test_*.py" ]
+python_classes = [ "Test*" ]
+python_functions = [ "test_*" ]
+
+# 标记定义
+markers = [
+  "unit: 单元测试",
+  "slow: 慢速测试（>1s）",
+  "redis: 需要 Redis Mock",
+  "celery: 需要 Celery Mock",
+  "network: 需要网络 Mock",
+]
+
+# 输出配置
+addopts = [
+  "-v",
+  "--tb=short",
+  "--cov=http_client",
+  "--cov-report=term-missing",
+  "--cov-fail-under=90",
+  "-p",
+  "no:warnings",
+]
+
+# 覆盖率配置
+
+[tool.coverage.run]
+source = [ "http_client" ]
+omit = [
+  "*/tests/*",
+  "*/__pycache__/*",
+  "*/site-packages/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
 
 [[tool.uv.index]]
 # 配置清华源
