@@ -4,6 +4,8 @@ HTTP 客户端异常模块
 定义所有 API 客户端相关的异常类，提供统一的错误处理机制
 """
 
+from __future__ import annotations
+
 import requests
 
 

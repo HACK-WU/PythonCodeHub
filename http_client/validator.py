@@ -1,8 +1,9 @@
-"""
-响应验证器模块
+"""响应验证器模块
 
 提供响应验证的基类和常用验证器实现
 """
+
+from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
@@ -10,10 +11,8 @@ from typing import Any
 
 import requests
 
-from http_client.constants import LOG_FORMAT
 from http_client.exceptions import APIClientResponseValidationError
 
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 
@@ -27,7 +26,7 @@ class BaseResponseValidator(ABC):
     @abstractmethod
     def validate(
         self,
-        client_instance: "BaseClient",  # noqa
+        client_instance: BaseClient,  # noqa
         response: requests.Response,
         parsed_data: Any,  # noqa: F821
     ) -> None:
@@ -65,7 +64,7 @@ class StatusCodeValidator(BaseResponseValidator):
 
     def validate(
         self,
-        client_instance: "BaseClient",  # noqa
+        client_instance: BaseClient,  # noqa
         response: requests.Response,
         parsed_data: Any,  # noqa: F821
     ) -> None:

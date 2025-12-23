@@ -60,17 +60,22 @@ from http_client.async_executor import (
 # 响应验证器
 from http_client.validator import (
     BaseResponseValidator,
-    CustomValidator,
-    JSONFieldValidator,
     StatusCodeValidator,
 )
 
 # 缓存支持
 from http_client.cache import (
     BaseCacheBackend,
-    CacheClientMixin,
     InMemoryCacheBackend,
     RedisCacheBackend,
+)
+
+# 工具函数
+from http_client.utils import (
+    mask_string,
+    sanitize_dict,
+    sanitize_headers,
+    sanitize_url,
 )
 
 # 常量配置
@@ -117,13 +122,15 @@ __all__ = [
     # 验证器
     "BaseResponseValidator",
     "StatusCodeValidator",
-    "JSONFieldValidator",
-    "CustomValidator",
     # 缓存
     "BaseCacheBackend",
     "InMemoryCacheBackend",
     "RedisCacheBackend",
-    "CacheClientMixin",
+    # 工具函数
+    "sanitize_headers",
+    "sanitize_url",
+    "sanitize_dict",
+    "mask_string",
     # 常量
     "DEFAULT_TIMEOUT",
     "DEFAULT_RETRIES",

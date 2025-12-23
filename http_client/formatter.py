@@ -4,13 +4,13 @@
 提供响应格式化的基类和默认实现，用于将 HTTP 响应统一格式化为标准结构
 """
 
+from __future__ import annotations
+
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
-from http_client.constants import LOG_FORMAT
 
-logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
 logger = logging.getLogger(__name__)
 
 
