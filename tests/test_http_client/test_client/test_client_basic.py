@@ -16,6 +16,7 @@ from http_client.client import BaseClient
 # 创建测试用的客户端子类
 class MyTestClient(BaseClient):
     """测试用的客户端子类"""
+
     base_url = "https://api.example.com"
     endpoint = "/test"
     method = "GET"
@@ -59,7 +60,7 @@ class TestBaseClientInitialization:
         client = MyTestClient()
 
         # Assert
-        assert hasattr(client, 'session')
+        assert hasattr(client, "session")
         assert isinstance(client.session, requests.Session)
 
     @pytest.mark.unit
@@ -82,9 +83,9 @@ class TestBaseClientSessionConfiguration:
 
         # Assert
         # 检查session的adapters中是否有HTTPAdapter
-        assert 'https://' in client.session.adapters
-        assert 'http://' in client.session.adapters
-        assert client.session.adapters['https://'] is not None
+        assert "https://" in client.session.adapters
+        assert "http://" in client.session.adapters
+        assert client.session.adapters["https://"] is not None
 
     @pytest.mark.unit
     def test_session_verify_configuration(self):
@@ -104,7 +105,7 @@ class TestBaseClientAuthentication:
         """测试带认证的初始化"""
         # Arrange
         mock_auth = Mock(spec=requests.auth.AuthBase)
-        
+
         # Act
         client = MyTestClient(authentication=mock_auth)
 
@@ -120,7 +121,7 @@ class TestBaseClientCleanup:
         """测试close方法关闭session"""
         # Arrange
         client = MyTestClient()
-        
+
         # Act
         client.close()
 
@@ -133,7 +134,7 @@ class TestBaseClientCleanup:
         # Arrange & Act
         with MyTestClient() as client:
             session = client.session
-        
+
         # Assert - 退出上下文后session应该被关闭
         assert session is not None
 
@@ -143,7 +144,7 @@ class TestBaseClientCleanup:
         # Arrange
         client = MyTestClient()
         session = client.session
-        
+
         # Act
         del client
 
@@ -159,10 +160,10 @@ class TestBaseClientURLBuilding:
         """测试带端点的URL构建"""
         # Arrange
         client = MyTestClient()
-        
+
         # Act
         url = client._build_url("/users")
-        
+
         # Assert
         assert url == "https://api.example.com/users"
 
@@ -171,10 +172,10 @@ class TestBaseClientURLBuilding:
         """测试不带端点的URL构建"""
         # Arrange
         client = MyTestClient()
-        
+
         # Act
         url = client._build_url("")
-        
+
         # Assert
         assert url == "https://api.example.com"
 
@@ -183,25 +184,26 @@ class TestBaseClientURLBuilding:
         """测试URL构建时去除前导斜杠"""
         # Arrange
         client = MyTestClient()
-        
+
         # Act
         url = client._build_url("///users")
-        
+
         # Assert
         assert url == "https://api.example.com/users"
 
     @pytest.mark.unit
     def test_base_url_trailing_slash_removed(self):
         """测试base_url末尾斜杠被移除"""
+
         # Arrange
         class ClientWithTrailingSlash(BaseClient):
             base_url = "https://api.example.com/"
             endpoint = "/test"
             method = "GET"
-        
+
         # Act
         client = ClientWithTrailingSlash()
-        
+
         # Assert
         assert client.base_url == "https://api.example.com"
 
@@ -214,45 +216,26 @@ class TestBaseClientRequestConfiguration:
         """测试基本请求参数构建"""
         # Arrange
         client = MyTestClient()
-        request_config = {"params": {"key": "value"}}
-        
+        request_config = {"key": "value"}
+
         # Act
-        kwargs = client._build_request_config(request_config, stream=False)
-        
+        kwargs = client._build_request_config(request_config)
+
         # Assert
         assert "params" in kwargs
         assert kwargs["params"] == {"key": "value"}
-        assert kwargs["stream"] is False
-
-    @pytest.mark.unit
-    def test_build_request_kwargs_filters_method_and_endpoint(self):
-        """测试请求参数构建时过滤method和endpoint"""
-        # Arrange
-        client = MyTestClient()
-        request_config = {
-            "method": "POST",
-            "endpoint": "/test",
-            "params": {"key": "value"}
-        }
-        
-        # Act
-        kwargs = client._build_request_config(request_config, stream=False)
-        
-        # Assert
-        assert "method" not in kwargs
-        assert "endpoint" not in kwargs
-        assert "params" in kwargs
+        assert "stream" in kwargs
 
     @pytest.mark.unit
     def test_build_request_kwargs_merges_defaults(self):
         """测试请求参数构建时合并默认参数"""
         # Arrange
         client = MyTestClient(verify=False)
-        request_config = {"params": {"key": "value"}}
-        
+        request_config = {"key": "value"}
+
         # Act
-        kwargs = client._build_request_config(request_config, stream=False)
-        
+        kwargs = client._build_request_config(request_config)
+
         # Assert
         assert kwargs["verify"] is False
 
@@ -265,10 +248,10 @@ class TestBaseClientRequestID:
         """测试请求ID格式"""
         # Arrange
         client = MyTestClient()
-        
+
         # Act
         request_id = client.generate_request_id()
-        
+
         # Assert
         assert request_id.startswith("REQ-")
         parts = request_id.split("-")
@@ -279,10 +262,10 @@ class TestBaseClientRequestID:
         """测试带后缀的请求ID生成"""
         # Arrange
         client = MyTestClient()
-        
+
         # Act
         request_id = client.generate_request_id(suffix="test")
-        
+
         # Assert
         assert request_id.endswith("-test")
 
@@ -291,11 +274,11 @@ class TestBaseClientRequestID:
         """测试请求ID唯一性"""
         # Arrange
         client = MyTestClient()
-        
+
         # Act
         id1 = client.generate_request_id()
         id2 = client.generate_request_id()
-        
+
         # Assert
         assert id1 != id2
 
@@ -309,14 +292,14 @@ class TestBaseClientHooks:
         # Arrange
         client = MyTestClient()
         hook_called = []
-        
+
         def my_hook(client_instance, request_id, request_config):
             hook_called.append(True)
             return request_config
-        
+
         # Act
         client.register_hook("before_request", my_hook)
-        
+
         # Assert
         assert len(client._hooks["before_request"]) == 1
 
@@ -326,14 +309,14 @@ class TestBaseClientHooks:
         # Arrange
         client = MyTestClient()
         hook_called = []
-        
+
         def my_hook(client_instance, request_id, response):
             hook_called.append(True)
             return response
-        
+
         # Act
         client.register_hook("after_request", my_hook)
-        
+
         # Assert
         assert len(client._hooks["after_request"]) == 1
 
@@ -343,13 +326,13 @@ class TestBaseClientHooks:
         # Arrange
         client = MyTestClient()
         hook_called = []
-        
+
         def my_hook(client_instance, request_id, error):
             hook_called.append(True)
-        
+
         # Act
         client.register_hook("on_request_error", my_hook)
-        
+
         # Assert
         assert len(client._hooks["on_request_error"]) == 1
 
@@ -358,10 +341,10 @@ class TestBaseClientHooks:
         """测试注册无效钩子名称"""
         # Arrange
         client = MyTestClient()
-        
+
         def my_hook():
             pass
-        
+
         # Act & Assert
         with pytest.raises(ValueError, match="Invalid hook name"):
             client.register_hook("invalid_hook", my_hook)
@@ -375,14 +358,15 @@ class TestBaseClientDefaultFormatResponse:
         """测试格式化成功响应"""
         # Arrange
         import requests
+
         client = MyTestClient()
         mock_response = Mock(spec=requests.Response)
         mock_response.status_code = 200
         parsed_data = {"key": "value"}
-        
+
         # Act
         result = client.default_format_response(mock_response, parsed_data, None)
-        
+
         # Assert
         assert result["result"] is True
         assert result["code"] == 200
@@ -394,14 +378,15 @@ class TestBaseClientDefaultFormatResponse:
         """测试格式化带解析错误的响应"""
         # Arrange
         import requests
+
         client = MyTestClient()
         mock_response = Mock(spec=requests.Response)
         mock_response.status_code = 200
         parse_error = ValueError("Parse failed")
-        
+
         # Act
         result = client.default_format_response(mock_response, None, parse_error)
-        
+
         # Assert
         assert result["result"] is False
         assert result["code"] == 200
@@ -413,13 +398,14 @@ class TestBaseClientDefaultFormatResponse:
         """测试格式化HTTP错误响应"""
         # Arrange
         from http_client.exceptions import APIClientHTTPError
+
         client = MyTestClient()
         error = APIClientHTTPError("HTTP 404: Not Found")
         error.status_code = 404
-        
+
         # Act
         result = client.default_format_response(error, None, None)
-        
+
         # Assert
         assert result["result"] is False
         assert result["code"] == 404
@@ -431,12 +417,13 @@ class TestBaseClientDefaultFormatResponse:
         """测试格式化网络错误响应"""
         # Arrange
         from http_client.exceptions import APIClientNetworkError
+
         client = MyTestClient()
         error = APIClientNetworkError("Connection failed")
-        
+
         # Act
         result = client.default_format_response(error, None, None)
-        
+
         # Assert
         assert result["result"] is False
         assert result["code"] == -1  # RESPONSE_CODE_NON_HTTP_ERROR
@@ -454,10 +441,10 @@ class TestBaseClientConfigMerging:
         client = MyTestClient()
         base_config = {"key1": "value1", "key2": "value2"}
         override_config = {"key2": "new_value2", "key3": "value3"}
-        
+
         # Act
         merged = client._merge_config(base_config, override_config)
-        
+
         # Assert
         assert merged["key1"] == "value1"
         assert merged["key2"] == "new_value2"
@@ -469,14 +456,10 @@ class TestBaseClientConfigMerging:
         # Arrange
         client = MyTestClient()
         base_config = {"total": 3, "backoff_factor": 0.3}
-        
+
         # Act
-        merged = client._merge_config(
-            base_config, 
-            None, 
-            max_retries_override=5
-        )
-        
+        merged = client._merge_config(base_config, None, max_retries_override=5)
+
         # Assert
         assert merged["total"] == 5
         assert merged["backoff_factor"] == 0.3
@@ -487,10 +470,10 @@ class TestBaseClientConfigMerging:
         # Arrange
         client = MyTestClient()
         base_config = {"key1": "value1"}
-        
+
         # Act
         merged = client._merge_config(base_config, None)
-        
+
         # Assert
         assert merged == base_config
 
@@ -503,10 +486,10 @@ class TestBaseClientValidation:
         """测试没有base_url时初始化失败"""
         # Arrange
         from http_client.exceptions import APIClientValidationError
-        
+
         class ClientWithoutURL(BaseClient):
             pass
-        
+
         # Act & Assert
         with pytest.raises(APIClientValidationError, match="base_url or url must be provided"):
             ClientWithoutURL()
@@ -516,7 +499,7 @@ class TestBaseClientValidation:
         """测试使用url参数初始化"""
         # Arrange & Act
         client = MyTestClient(url="https://custom.example.com/api")
-        
+
         # Assert
         assert client.url == "https://custom.example.com/api"
 
@@ -529,30 +512,30 @@ class TestBaseClientThreadSafety:
         """测试存在request_mapping锁"""
         # Arrange
         client = MyTestClient()
-        
+
         # Assert
-        assert hasattr(client, '_request_mapping_lock')
+        assert hasattr(client, "_request_mapping_lock")
         # RLock是一个函数返回的对象，不是类型，所以检查类型名称
-        assert type(client._request_mapping_lock).__name__ == 'RLock'
+        assert type(client._request_mapping_lock).__name__ == "RLock"
 
     @pytest.mark.unit
     def test_has_session_lock(self):
         """测试存在session锁"""
         # Arrange
         client = MyTestClient()
-        
+
         # Assert
-        assert hasattr(client, '_session_lock')
+        assert hasattr(client, "_session_lock")
         # RLock是一个函数返回的对象，不是类型，所以检查类型名称
-        assert type(client._session_lock).__name__ == 'RLock'
+        assert type(client._session_lock).__name__ == "RLock"
 
     @pytest.mark.unit
     def test_has_stream_responses_lock(self):
         """测试存在stream_responses锁"""
         # Arrange
         client = MyTestClient()
-        
+
         # Assert
-        assert hasattr(client, '_stream_responses_lock')
+        assert hasattr(client, "_stream_responses_lock")
         # RLock是一个函数返回的对象，不是类型，所以检查类型名称
-        assert type(client._stream_responses_lock).__name__ == 'RLock'
+        assert type(client._stream_responses_lock).__name__ == "RLock"

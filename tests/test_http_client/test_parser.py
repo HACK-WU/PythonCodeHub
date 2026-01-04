@@ -6,11 +6,10 @@ parser.py 模块的单元测试
 """
 
 import os
-import json
 import tempfile
 import pytest
 from abc import ABC
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 from http_client.parser import (
     BaseResponseParser,
     JSONResponseParser,
@@ -29,7 +28,7 @@ class TestBaseResponseParser:
         """验证 BaseResponseParser 是抽象类"""
         # Arrange & Act & Assert
         assert issubclass(BaseResponseParser, ABC)
-        
+
         # 验证不能直接实例化
         with pytest.raises(TypeError, match="Can't instantiate abstract class"):
             BaseResponseParser()
@@ -38,14 +37,14 @@ class TestBaseResponseParser:
     def test_has_abstract_parse_method(self):
         """验证 BaseResponseParser 有抽象 parse 方法"""
         # Arrange & Act & Assert
-        assert hasattr(BaseResponseParser, 'parse')
-        assert getattr(BaseResponseParser.parse, '__isabstractmethod__', False)
+        assert hasattr(BaseResponseParser, "parse")
+        assert getattr(BaseResponseParser.parse, "__isabstractmethod__", False)
 
     @pytest.mark.unit
     def test_has_is_stream_attribute(self):
         """验证 BaseResponseParser 有 is_stream 类变量"""
         # Arrange & Act & Assert
-        assert hasattr(BaseResponseParser, 'is_stream')
+        assert hasattr(BaseResponseParser, "is_stream")
         assert BaseResponseParser.is_stream is False
 
 
@@ -88,13 +87,16 @@ class TestJSONResponseParser:
         mock_response.json.assert_called_once()
 
     @pytest.mark.unit
-    @pytest.mark.parametrize('json_data', [
-        {"key": "value"},
-        {"nested": {"data": [1, 2, 3]}},
-        [],
-        [{"id": 1}, {"id": 2}],
-        {"result": True, "code": 200, "message": "OK", "data": None},
-    ])
+    @pytest.mark.parametrize(
+        "json_data",
+        [
+            {"key": "value"},
+            {"nested": {"data": [1, 2, 3]}},
+            [],
+            [{"id": 1}, {"id": 2}],
+            {"result": True, "code": 200, "message": "OK", "data": None},
+        ],
+    )
     def test_parse_various_json_formats(self, parser, mock_client, json_data):
         """参数化测试: 解析各种 JSON 格式"""
         # Arrange
@@ -150,12 +152,15 @@ class TestContentResponseParser:
         assert isinstance(result, bytes)
 
     @pytest.mark.unit
-    @pytest.mark.parametrize('content', [
-        b"simple text",
-        b"\x00\x01\x02\x03",
-        b"",
-        b"UTF-8: \xe4\xb8\xad\xe6\x96\x87",
-    ])
+    @pytest.mark.parametrize(
+        "content",
+        [
+            b"simple text",
+            b"\x00\x01\x02\x03",
+            b"",
+            b"UTF-8: \xe4\xb8\xad\xe6\x96\x87",
+        ],
+    )
     def test_parse_various_byte_content(self, parser, mock_client, content):
         """参数化测试: 解析各种字节内容"""
         # Arrange
@@ -248,7 +253,7 @@ class TestStreamResponseParser:
         # Assert
         assert result is mock_response
         # 验证 iter_content 方法存在
-        assert hasattr(result, 'iter_content')
+        assert hasattr(result, "iter_content")
 
 
 class TestFileWriteResponseParser:
@@ -288,11 +293,7 @@ class TestFileWriteResponseParser:
     def test_initialization_custom_params(self, temp_dir):
         """UT-PARSER-009: 自定义参数初始化"""
         # Arrange & Act
-        parser = FileWriteResponseParser(
-            base_path=temp_dir,
-            chunk_size=4096,
-            default_filename="custom_file.txt"
-        )
+        parser = FileWriteResponseParser(base_path=temp_dir, chunk_size=4096, default_filename="custom_file.txt")
 
         # Assert
         assert parser.base_path == temp_dir
@@ -315,7 +316,7 @@ class TestFileWriteResponseParser:
         assert os.path.exists(file_path)
         assert file_path.startswith(temp_dir)
         assert "testfile.txt" in file_path
-        
+
         # 验证文件内容
         with open(file_path, "rb") as f:
             content = f.read()
@@ -407,7 +408,7 @@ class TestFileWriteResponseParser:
         # Arrange
         non_existent_path = os.path.join(temp_dir, "subdir", "nested")
         parser = FileWriteResponseParser(base_path=non_existent_path)
-        
+
         mock_response = Mock()
         mock_response.url = "https://api.example.com/file.txt"
         mock_response.iter_content = Mock(return_value=iter([b"content"]))
@@ -428,11 +429,11 @@ class TestFileWriteResponseParser:
         # Arrange
         file_name = "existing.txt"
         file_path = os.path.join(temp_dir, file_name)
-        
+
         # 创建已存在的文件
         with open(file_path, "wb") as f:
             f.write(b"old content")
-        
+
         mock_response = Mock()
         mock_response.url = f"https://api.example.com/{file_name}"
         mock_response.iter_content = Mock(return_value=iter([b"new content"]))
@@ -452,7 +453,7 @@ class TestFileWriteResponseParser:
         # Arrange
         custom_chunk_size = 2048
         parser = FileWriteResponseParser(base_path=temp_dir, chunk_size=custom_chunk_size)
-        
+
         mock_response = Mock()
         mock_response.url = "https://api.example.com/file.bin"
         mock_response.iter_content = Mock(return_value=iter([b"x" * 100]))

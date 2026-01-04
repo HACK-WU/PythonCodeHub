@@ -71,10 +71,10 @@ class TestRetryConfiguration:
     def test_retry_config_dict(self):
         """UT-CONST-004: 重试策略配置字典"""
         assert isinstance(constants.DEFAULT_RETRY_CONFIG, dict)
-        assert 'total' in constants.DEFAULT_RETRY_CONFIG
-        assert 'backoff_factor' in constants.DEFAULT_RETRY_CONFIG
-        assert 'status_forcelist' in constants.DEFAULT_RETRY_CONFIG
-        assert 'allowed_methods' in constants.DEFAULT_RETRY_CONFIG
+        assert "total" in constants.DEFAULT_RETRY_CONFIG
+        assert "backoff_factor" in constants.DEFAULT_RETRY_CONFIG
+        assert "status_forcelist" in constants.DEFAULT_RETRY_CONFIG
+        assert "allowed_methods" in constants.DEFAULT_RETRY_CONFIG
 
     @pytest.mark.unit
     def test_retry_status_forcelist(self):
@@ -101,8 +101,8 @@ class TestPoolConfiguration:
     def test_pool_config_dict(self):
         """连接池配置字典"""
         assert isinstance(constants.DEFAULT_POOL_CONFIG, dict)
-        assert 'pool_connections' in constants.DEFAULT_POOL_CONFIG
-        assert 'pool_maxsize' in constants.DEFAULT_POOL_CONFIG
+        assert "pool_connections" in constants.DEFAULT_POOL_CONFIG
+        assert "pool_maxsize" in constants.DEFAULT_POOL_CONFIG
 
     @pytest.mark.unit
     def test_pool_values(self):

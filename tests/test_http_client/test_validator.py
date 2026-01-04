@@ -26,7 +26,7 @@ class TestBaseResponseValidator:
         """UT-VAL-007: BaseResponseValidator 是抽象类"""
         # Arrange & Act & Assert
         assert issubclass(BaseResponseValidator, ABC)
-        
+
         # 验证不能直接实例化
         with pytest.raises(TypeError, match="Can't instantiate abstract class"):
             BaseResponseValidator()
@@ -35,8 +35,8 @@ class TestBaseResponseValidator:
     def test_has_abstract_validate_method(self):
         """UT-VAL-007: BaseResponseValidator 有抽象 validate 方法"""
         # Arrange & Act & Assert
-        assert hasattr(BaseResponseValidator, 'validate')
-        assert getattr(BaseResponseValidator.validate, '__isabstractmethod__', False)
+        assert hasattr(BaseResponseValidator, "validate")
+        assert getattr(BaseResponseValidator.validate, "__isabstractmethod__", False)
 
 
 class TestStatusCodeValidatorInitialization:
@@ -104,7 +104,7 @@ class TestStatusCodeValidatorValidation:
         """Mock Response 对象"""
         response = Mock()
         response.status_code = 200
-        response.url = 'https://api.example.com/test'
+        response.url = "https://api.example.com/test"
         return response
 
     @pytest.mark.unit
@@ -122,7 +122,7 @@ class TestStatusCodeValidatorValidation:
         """UT-VAL-002: 验证自定义允许的状态码"""
         # Arrange
         validator = StatusCodeValidator(allowed_codes=[200, 201, 204])
-        
+
         # Act & Assert - 测试所有允许的状态码
         for code in [200, 201, 204]:
             mock_response.status_code = code
@@ -138,18 +138,15 @@ class TestStatusCodeValidatorValidation:
         # Act & Assert
         with pytest.raises(APIClientResponseValidationError) as exc_info:
             validator.validate(mock_client, mock_response, parsed_data=None)
-        
+
         # 验证异常信息
         assert "404" in str(exc_info.value)
         assert "not in allowed codes" in str(exc_info.value)
         assert exc_info.value.response == mock_response
-        assert exc_info.value.validation_result == {
-            "status_code": 404,
-            "allowed_codes": [200, 201]
-        }
+        assert exc_info.value.validation_result == {"status_code": 404, "allowed_codes": [200, 201]}
 
     @pytest.mark.unit
-    @pytest.mark.parametrize('status_code', [400, 401, 403, 404, 500, 502, 503])
+    @pytest.mark.parametrize("status_code", [400, 401, 403, 404, 500, 502, 503])
     def test_validate_rejects_various_error_codes(self, mock_client, mock_response, status_code):
         """参数化测试: 严格模式拒绝各种错误状态码"""
         # Arrange
@@ -159,8 +156,8 @@ class TestStatusCodeValidatorValidation:
         # Act & Assert
         with pytest.raises(APIClientResponseValidationError) as exc_info:
             validator.validate(mock_client, mock_response, parsed_data=None)
-        
-        assert exc_info.value.validation_result['status_code'] == status_code
+
+        assert exc_info.value.validation_result["status_code"] == status_code
 
     @pytest.mark.unit
     def test_validate_non_strict_mode_allows_any_code(self, mock_client, mock_response):
@@ -184,13 +181,16 @@ class TestStatusCodeValidatorValidation:
         validator.validate(mock_client, mock_response, parsed_data=parsed_data)
 
     @pytest.mark.unit
-    @pytest.mark.parametrize('parsed_data', [
-        {"key": "value"},
-        [],
-        "string data",
-        123,
-        True,
-    ])
+    @pytest.mark.parametrize(
+        "parsed_data",
+        [
+            {"key": "value"},
+            [],
+            "string data",
+            123,
+            True,
+        ],
+    )
     def test_validate_skips_with_various_parsed_data(self, mock_client, mock_response, parsed_data):
         """参数化测试: 各种类型的 parsed_data 都会跳过验证"""
         # Arrange
@@ -210,7 +210,7 @@ class TestStatusCodeValidatorValidation:
         # Act & Assert
         with pytest.raises(APIClientResponseValidationError) as exc_info:
             validator.validate(mock_client, mock_response, parsed_data=None)
-        
+
         error_msg = str(exc_info.value)
         assert "404" in error_msg
         assert "200" in error_msg or "201" in error_msg
