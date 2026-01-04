@@ -1036,66 +1036,73 @@ class BaseClient:
         self, request_data: RequestData = None, is_async: bool = False
     ) -> ResponseDict | list[ResponseDict | Exception]:
         """
-        执行 HTTP 请求的统一入口方法（支持实例调用和类调用）
-
-        该方法支持两种调用方式：
-        1. 实例方法调用：client.request(request_data) - 复用已有实例和连接
-        2. 类方法调用：MyClient.request(request_data, **client_kwargs) - 自动创建临时实例
-
-        参数:
-            request_data: 请求配置字典或配置列表
-            is_async: 是否使用异步执行器并发执行（仅对列表有效）
-            **client_kwargs: 仅类方法调用时有效，传递给客户端构造函数的额外参数
-
-        返回:
-            单个请求: 格式化后的响应字典
-            多个请求: 格式化后的响应字典列表（可能包含异常对象）
-
-        执行步骤（实例方法调用）:
-            1. 验证 request_data 类型
-            2. 单个请求: 直接调用 _make_request_and_format
-            3. 多个请求 + 异步: 使用异步执行器并发执行
-            4. 多个请求 + 同步: 顺序执行所有请求
-
-        执行步骤（类方法调用）:
-            1. 自动创建临时客户端实例
-            2. 调用实例方法执行请求
-            3. 自动清理资源并返回结果
+        执行 HTTP 请求的统一入口方法，支持单个请求和批量请求
 
         使用示例:
-            # 方式1: 实例方法调用（适合多次请求，复用连接）
-            with MyClient() as client:
-                result1 = client.request({"endpoint": "/api/users"})
-                result2 = client.request({"endpoint": "/api/posts"})
+            # 定义 API 客户端子类
+            class UserAPIClient(BaseClient):
+                base_url = "https://api.example.com"
+                endpoint = "/users"
+                method = "GET"
 
-            # 方式2: 类方法调用（适合一次性请求，自动管理生命周期）
-            result = MyClient.request(
-                {"endpoint": "/api/users"},
-                timeout=30,
-                headers={"Authorization": "Bearer token"}
-            )
+            # ========== 方式1: 类方法调用（自动创建临时实例） ==========
+            # 单个请求 - 使用默认配置
+            response = UserAPIClient.request()
 
-            # 批量异步请求（类方法调用）
-            results = MyClient.request([
-                {"endpoint": "/api/users/1"},
-                {"endpoint": "/api/users/2"}
+            # 单个请求 - 传入请求参数（GET 请求参数会自动放入 URL 查询字符串）
+            response = UserAPIClient.request({"id": 123, "status": "active"})
+
+            # ========== 方式2: 实例方法调用（复用客户端实例） ==========
+            # 创建客户端实例
+            client = UserAPIClient(timeout=30)
+
+            # 单个请求
+            response = client.request({"id": 123})
+
+            # 使用上下文管理器（推荐，自动关闭会话）
+            with UserAPIClient() as client:
+                response = client.request({"id": 123})
+
+            # ========== 方式3: 批量请求 ==========
+            # 同步批量请求（顺序执行）
+            responses = UserAPIClient.request([
+                {"id": 1},
+                {"id": 2},
+                {"id": 3}
+            ])
+
+            # 异步批量请求（并发执行，性能更优）
+            responses = UserAPIClient.request([
+                {"id": 1},
+                {"id": 2},
+                {"id": 3}
             ], is_async=True)
 
-        异常:
-            APIClientValidationError: 当 request_data 类型无效时抛出
+            # ========== 方式4: POST 请求示例 ==========
+            class CreateUserClient(BaseClient):
+                base_url = "https://api.example.com"
+                endpoint = "/users"
+                method = "POST"
+
+            # POST 请求参数会自动放入请求体（JSON 格式）
+            response = CreateUserClient.request({
+                "username": "john_doe",
+                "email": "john@example.com"
+            })
         """
         try:
-            # 处理单个请求
+            # 处理单个请求：request_data 为 None 或字典时，执行单个请求
             if request_data is None or isinstance(request_data, dict):
                 return self._execute_single_request(request_data or {})
 
-            # 处理批量请求
+            # 处理批量请求：request_data 为列表时，根据 is_async 参数决定同步或异步执行
             if isinstance(request_data, list):
                 return self._execute_batch_requests(request_data, is_async)
 
+            # request_data 类型无效，抛出验证异常
             raise APIClientValidationError("request_data must be a dictionary or a list of dictionaries")
         finally:
-            # 清空请求映射
+            # 请求完成后清空请求映射缓存，使用线程锁确保线程安全
             with self._request_mapping_lock:
                 self.request_mapping = {}
 
