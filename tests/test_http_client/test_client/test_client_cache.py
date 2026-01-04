@@ -368,3 +368,124 @@ class TestCacheBackendFallback:
         # 应该回退到内存缓存并正常工作
         assert result["result"] is True
         assert isinstance(client.cache_backend, InMemoryCacheBackend)
+
+
+class TestCacheClientConcurrent:
+    """测试并发请求下的缓存效果（使用 is_async=True）"""
+
+    @pytest.mark.unit
+    @responses.activate
+    def test_async_batch_requests_cache_hit(self):
+        """测试异步批量请求时的缓存命中"""
+        # Arrange
+        for _ in range(10):
+            responses.add(responses.GET, "https://api.example.com/users", json={"users": [{"id": 1}]}, status=200)
+        client = SimpleCacheAPIClient(max_workers=5)
+
+        # Act - 第一次异步批量请求
+        request_list = [{} for _ in range(10)]
+        results1 = client.request(request_list, is_async=True)
+
+        # 第二次异步批量请求应命中缓存
+        results2 = client.request(request_list, is_async=True)
+
+        # Assert
+        assert len(results1) == 10
+        assert len(results2) == 10
+        assert all(r["result"] is True for r in results1)
+        assert all(r["result"] is True for r in results2)
+        # 第二次请求应全部命中缓存，总请求次数应等于第一次的请求数
+        assert len(responses.calls) == 10
+
+    @pytest.mark.unit
+    @responses.activate
+    def test_async_batch_requests_different_params(self):
+        """测试异步批量请求不同参数时的缓存隔离"""
+        # Arrange
+        for _ in range(5):
+            responses.add(responses.GET, "https://api.example.com/users", json={"data": "ok"}, status=200)
+        client = SimpleCacheAPIClient(max_workers=5)
+
+        # Act - 5个不同参数的异步批量请求
+        request_list = [{"page": i} for i in range(1, 6)]
+        results1 = client.request(request_list, is_async=True)
+
+        # 第二次相同参数请求应命中缓存
+        results2 = client.request(request_list, is_async=True)
+
+        # Assert
+        assert len(results1) == 5
+        assert len(results2) == 5
+        assert all(r["result"] is True for r in results1)
+        assert all(r["result"] is True for r in results2)
+        # 第二次请求全部命中缓存
+        assert len(responses.calls) == 5
+
+    @pytest.mark.unit
+    @responses.activate
+    def test_async_batch_partial_cache_hit(self):
+        """测试异步批量请求部分缓存命中"""
+        # Arrange
+        for _ in range(8):
+            responses.add(responses.GET, "https://api.example.com/users", json={"data": "ok"}, status=200)
+        client = SimpleCacheAPIClient(max_workers=5)
+
+        # Act - 第一次请求 page 1-5
+        request_list1 = [{"page": i} for i in range(1, 6)]
+        results1 = client.request(request_list1, is_async=True)
+        assert len(responses.calls) == 5
+
+        # 第二次请求 page 3-8，其中 3-5 应命中缓存，6-8 需新请求
+        request_list2 = [{"page": i} for i in range(3, 9)]
+        results2 = client.request(request_list2, is_async=True)
+
+        # Assert
+        assert len(results1) == 5
+        assert len(results2) == 6
+        assert all(r["result"] is True for r in results1)
+        assert all(r["result"] is True for r in results2)
+        # 新增3次请求（page 6, 7, 8）
+        assert len(responses.calls) == 8
+
+    @pytest.mark.unit
+    @responses.activate
+    def test_async_cache_after_warmup(self):
+        """测试预热缓存后的异步批量请求"""
+        # Arrange
+        responses.add(responses.GET, "https://api.example.com/users", json={"users": [{"id": 1}]}, status=200)
+        client = SimpleCacheAPIClient(max_workers=5)
+
+        # 预热缓存（单个请求）
+        warmup_result = client.request()
+        assert warmup_result["result"] is True
+        assert len(responses.calls) == 1
+
+        # Act - 预热后异步批量发送相同请求
+        request_list = [{} for _ in range(10)]
+        results = client.request(request_list, is_async=True)
+
+        # Assert
+        assert len(results) == 10
+        assert all(r["result"] is True for r in results)
+        # 预热后所有请求都应命中缓存，不发送新的HTTP请求
+        assert len(responses.calls) == 1
+
+    @pytest.mark.unit
+    @responses.activate
+    def test_async_batch_with_max_workers(self):
+        """测试不同 max_workers 配置下的异步批量请求"""
+        # Arrange
+        for _ in range(20):
+            responses.add(responses.GET, "https://api.example.com/users", json={"data": "ok"}, status=200)
+
+        # 使用较大的 max_workers
+        client = SimpleCacheAPIClient(max_workers=10)
+
+        # Act
+        request_list = [{"id": i} for i in range(20)]
+        results = client.request(request_list, is_async=True)
+
+        # Assert
+        assert len(results) == 20
+        assert all(r["result"] is True for r in results)
+        assert len(responses.calls) == 20
