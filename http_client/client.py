@@ -19,6 +19,8 @@ import threading
 from typing import Any, TypeAlias
 
 import requests
+import re
+
 from requests.adapters import HTTPAdapter
 from requests.auth import AuthBase
 from urllib3.util.retry import Retry
@@ -813,13 +815,57 @@ class BaseClient:
         """
         return f"{self.base_url}/{endpoint.lstrip('/')}" if endpoint else self.base_url
 
+    def _render_endpoint(self, endpoint: str, request_data: RequestData) -> tuple[str, RequestData]:
+        """
+        渲染 endpoint 中的变量占位符
+
+        支持使用 {variable_name} 格式的占位符，从 request_data 中提取对应值进行替换。
+        已使用的变量会从 request_data 中移除，避免重复传递。
+
+        参数:
+            endpoint: 包含变量占位符的端点路径，如 "/users/{user_id}/posts/{post_id}"
+            request_data: 请求数据字典，包含用于替换占位符的变量值
+
+        返回:
+            tuple[str, RequestData]: (渲染后的 endpoint, 移除已使用变量后的 request_data)
+
+        示例:
+            endpoint = "/users/{user_id}/posts/{post_id}"
+            request_data = {"user_id": 123, "post_id": 456, "title": "Hello"}
+            # 返回: ("/users/123/posts/456", {"title": "Hello"})
+        """
+
+        if not endpoint or not request_data:
+            return endpoint, request_data
+
+        # 匹配 {variable_name} 格式的占位符
+        pattern = re.compile(r"\{(\w+)\}")
+        matches = pattern.findall(endpoint)
+
+        if not matches:
+            return endpoint, request_data
+
+        # 复制 request_data 避免修改原始数据
+        remaining_data = dict(request_data)
+        rendered_endpoint = endpoint
+
+        for var_name in matches:
+            if var_name in remaining_data:
+                # 替换占位符并从数据中移除已使用的变量
+                rendered_endpoint = rendered_endpoint.replace(f"{{{var_name}}}", str(remaining_data.pop(var_name)))
+
+        return rendered_endpoint, remaining_data
+
     def _build_request_config(self, request_data: RequestData) -> dict[str, Any]:
         """
         构建请求参数字典
         """
         method = self._class_default_method
-        url = self.url
         stream_flag = getattr(self.response_parser_instance, "is_stream", False)
+
+        # 渲染 endpoint 中的变量，并获取剩余的请求数据
+        rendered_endpoint, remaining_data = self._render_endpoint(self._class_default_endpoint, request_data)
+        url = self._build_url(rendered_endpoint)
 
         # 基础请求参数
         request_kwargs = {
@@ -832,14 +878,14 @@ class BaseClient:
         }
 
         # 处理请求数据：根据 HTTP 方法和数据类型智能选择参数位置
-        if request_data:
+        if remaining_data:
             # 根据 HTTP 方法自动选择参数位置
             if method in ("GET", "DELETE", "HEAD", "OPTIONS"):
                 # 查询参数方法：数据放在 URL 参数中
-                request_kwargs["params"] = request_data
+                request_kwargs["params"] = remaining_data
             elif method in ("POST", "PUT", "PATCH"):
                 # 请求体方法：默认使用 JSON 格式
-                request_kwargs["json"] = request_data
+                request_kwargs["json"] = remaining_data
 
         return request_kwargs
 
