@@ -126,7 +126,7 @@ class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
                     result = future.result()
                     results_dict[request_id] = result
                 except APIClientError as e:
-                    logger.exception(f"Request {request_id} failed with APIClientError")
+                    logger.exception(f"Request {request_id} failed with APIClientError:{e}")
                     results_dict[request_id] = {
                         "result": False,
                         "code": getattr(e, "status_code", RESPONSE_CODE_NON_HTTP_ERROR),
@@ -134,7 +134,7 @@ class ThreadPoolAsyncExecutor(BaseAsyncExecutor):
                         "data": None,
                     }
                 except Exception as e:
-                    logger.exception(f"Request {request_id} failed with unexpected error")
+                    logger.exception(f"Request {request_id} failed with unexpected error:{e}")
                     results_dict[request_id] = {
                         "result": False,
                         "code": RESPONSE_CODE_NON_HTTP_ERROR,
@@ -221,7 +221,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
                 result = async_result.get(timeout=self.wait_timeout)
                 results_dict[request_id] = result
             except CeleryTimeoutError as e:
-                logger.exception(f"Request {request_id} timeout")
+                logger.exception(f"Request {request_id} timeout:{e}")
                 results_dict[request_id] = {
                     "result": False,
                     "code": RESPONSE_CODE_NON_HTTP_ERROR,
@@ -229,7 +229,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
                     "data": None,
                 }
             except Exception as e:  # pylint: disable=broad-except
-                logger.exception(f"Request {request_id} failed")
+                logger.exception(f"Request {request_id} failed:{e}")
                 results_dict[request_id] = {
                     "result": False,
                     "code": RESPONSE_CODE_NON_HTTP_ERROR,
