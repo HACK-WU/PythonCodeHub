@@ -94,14 +94,11 @@ class InMemoryCacheBackend(BaseCacheBackend):
             self.cache[key] = (value, expire_at)
             self.cache.move_to_end(key)
 
-            # 清理过期项
+            # LRU 淘汰：超过容量时移除最旧的项
             while len(self.cache) > self.maxsize:
                 oldest_key = next(iter(self.cache))
-                _, oldest_expire = self.cache[oldest_key]
-                if oldest_expire is not None and time.time() >= oldest_expire:
-                    del self.cache[oldest_key]
-                else:
-                    break
+                del self.cache[oldest_key]
+                logger.debug(f"InMemoryCache evicted oldest key: {oldest_key}")
 
             logger.debug(f"InMemoryCache set for key: {key}, expire: {expire}")
 
@@ -115,6 +112,11 @@ class InMemoryCacheBackend(BaseCacheBackend):
         with self.lock:
             self.cache.clear()
             logger.debug("InMemoryCache cleared")
+
+    def __len__(self) -> int:
+        """返回当前缓存条目数"""
+        with self.lock:
+            return len(self.cache)
 
     def _lazy_cleanup(self) -> None:
         """惰性清理过期缓存项，避免内存泄漏"""
