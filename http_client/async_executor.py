@@ -14,7 +14,7 @@ from typing import Any
 
 from celery import Celery, current_app, shared_task
 from celery.exceptions import TimeoutError as CeleryTimeoutError
-from celery.result import AsyncResult
+from celery.result import AsyncResult, ResultSet
 
 from http_client.constants import RESPONSE_CODE_NON_HTTP_ERROR
 from http_client.exceptions import APIClientError
@@ -29,13 +29,21 @@ CELERY_REQUEST_TASK_NAME = "http_client.execute_request_task"
 def execute_request_task(
     self, client_path: str, request_id: str, request_config: dict[str, Any], client_kwargs: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """使用 Celery 执行单个请求"""
+    """
+    使用 Celery 执行单个请求
+
+    参数:
+        client_path: 客户端类的完整路径（module.ClassName）
+        request_id: 请求唯一标识，由调用方传入，避免重复生成
+        request_config: 已验证的请求配置字典（调用方已完成验证）
+        client_kwargs: 构造客户端实例的参数
+    """
     module_name, class_name = client_path.rsplit(".", 1)
     client_module = import_module(module_name)
     client_cls = getattr(client_module, class_name)
-    # 这里延迟导入以避免循环依赖
+
     with client_cls(**(client_kwargs or {})) as client:  # type: ignore[call-arg]
-        return client._execute_single_request(request_config)  # type: ignore[attr-defined]
+        return client._make_request_and_format(request_id, request_config)  # type: ignore[attr-defined]
 
 
 class BaseAsyncExecutor:
@@ -155,14 +163,16 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
     执行流程:
         1. 提交所有请求任务到 Celery 队列
         2. 并发执行请求，每个请求由 Celery worker 处理
-        3. 收集所有结果，保持原始顺序返回
-        4. 自动处理异常，确保不会因单个请求失败而中断整体执行
+        3. 使用 ResultSet 并行等待所有任务完成
+        4. 收集所有结果，保持原始顺序返回
+        5. 自动处理异常，确保不会因单个请求失败而中断整体执行
 
     参数:
         celery_app: Celery 实例，默认使用 current_app
         task_name: Celery 任务名称，默认 http_client.execute_request_task
         client_kwargs: 构造客户端实例时使用的参数
-        wait_timeout: 等待任务结果的超时时间（秒），None 表示不限制
+        wait_timeout: 等待所有任务完成的总超时时间（秒），None 表示不限制
+        revoke_on_timeout: 超时时是否撤销未完成的任务，默认 True
     """
 
     def __init__(
@@ -171,6 +181,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
         task_name: str | None = None,
         client_kwargs: dict[str, Any] | None = None,
         wait_timeout: int | None = None,
+        revoke_on_timeout: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -178,6 +189,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
         self.task_name = task_name or CELERY_REQUEST_TASK_NAME
         self.client_kwargs_template = client_kwargs or {}
         self.wait_timeout = wait_timeout
+        self.revoke_on_timeout = revoke_on_timeout
 
     def execute(
         self,
@@ -201,8 +213,8 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
         client_path = f"{client_instance.__class__.__module__}.{client_instance.__class__.__name__}"
         client_kwargs = self._build_client_kwargs(client_instance)
 
-        # 使用字典维护 async_result 与 request_id 的映射关系
-        async_result_to_request_id: dict[AsyncResult, str] = {}
+        # 维护 request_id 与 async_result 的映射关系
+        request_id_to_async_result: dict[str, AsyncResult] = {}
         request_id_list = list(validated_request_mapping.keys())
 
         # 提交所有请求任务
@@ -212,33 +224,55 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
                 self.task_name,
                 args=[client_path, request_id, payload, client_kwargs],
             )
-            async_result_to_request_id[async_result] = request_id
+            request_id_to_async_result[request_id] = async_result
 
-        # 收集所有任务结果，使用字典暂存
+        # 使用 ResultSet 并行等待所有任务完成
+        result_set = ResultSet(list(request_id_to_async_result.values()))
+        try:
+            result_set.get(timeout=self.wait_timeout, propagate=False)
+        except CeleryTimeoutError:
+            logger.warning(f"Celery tasks timeout after {self.wait_timeout}s")
+            if self.revoke_on_timeout:
+                self._revoke_pending_tasks(request_id_to_async_result)
+
+        # 收集所有任务结果
         results_dict: dict[str, dict] = {}
-        for async_result, request_id in async_result_to_request_id.items():
-            try:
-                result = async_result.get(timeout=self.wait_timeout)
-                results_dict[request_id] = result
-            except CeleryTimeoutError as e:
-                logger.exception(f"Request {request_id} timeout:{e}")
-                results_dict[request_id] = {
-                    "result": False,
-                    "code": RESPONSE_CODE_NON_HTTP_ERROR,
-                    "message": f"Celery task timeout: {e}",
-                    "data": None,
-                }
-            except Exception as e:  # pylint: disable=broad-except
-                logger.exception(f"Request {request_id} failed:{e}")
-                results_dict[request_id] = {
-                    "result": False,
-                    "code": RESPONSE_CODE_NON_HTTP_ERROR,
-                    "message": f"Celery task error: {e}",
-                    "data": None,
-                }
+        for request_id in request_id_list:
+            async_result = request_id_to_async_result[request_id]
+            results_dict[request_id] = self._get_task_result(request_id, async_result)
 
         # 按原始顺序返回结果
         return [results_dict[request_id] for request_id in request_id_list]
+
+    def _get_task_result(self, request_id: str, async_result: AsyncResult) -> dict:
+        """获取单个任务的结果"""
+        if async_result.successful():
+            return async_result.result
+        elif async_result.failed():
+            error = async_result.result
+            logger.error(f"Request {request_id} failed: {error}")
+            return {
+                "result": False,
+                "code": RESPONSE_CODE_NON_HTTP_ERROR,
+                "message": f"Celery task error: {error}",
+                "data": None,
+            }
+        else:
+            # 任务未完成（PENDING/STARTED/RETRY 等状态）
+            logger.warning(f"Request {request_id} not completed, state: {async_result.state}")
+            return {
+                "result": False,
+                "code": RESPONSE_CODE_NON_HTTP_ERROR,
+                "message": f"Task not completed, state: {async_result.state}",
+                "data": None,
+            }
+
+    def _revoke_pending_tasks(self, request_id_to_async_result: dict[str, AsyncResult]) -> None:
+        """撤销未完成的任务"""
+        for request_id, async_result in request_id_to_async_result.items():
+            if not async_result.ready():
+                async_result.revoke(terminate=True)
+                logger.info(f"Revoked pending task for request {request_id}")
 
     def _build_client_kwargs(self, client_instance: BaseClient) -> dict[str, Any]:  # noqa: F821
         """从客户端实例中提取可序列化的初始化参数"""
@@ -246,7 +280,7 @@ class CeleryAsyncExecutor(BaseAsyncExecutor):
             return deepcopy(self.client_kwargs_template)
 
         base_kwargs = {
-            "default_headers": deepcopy(getattr(client_instance, "default_headers", {})),
+            "headers": deepcopy(getattr(client_instance, "default_headers", {})),
             "timeout": getattr(client_instance, "timeout", None),
             "verify": getattr(client_instance, "verify", None),
             "enable_retry": getattr(client_instance, "enable_retry", None),
