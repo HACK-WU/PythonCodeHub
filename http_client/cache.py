@@ -540,20 +540,21 @@ class CacheClient(BaseClient):
         批量请求的缓存处理
 
         执行流程:
-            1. 遍历请求列表，检查每个请求的缓存状态
-            2. 缓存命中的直接记录结果
+            1. 遍历请求列表，检查每个请求的缓存状态，记录索引位置
+            2. 缓存命中的直接存储到对应索引位置
             3. 缓存未命中的收集起来，调用 _original_request 执行（复用 BaseClient 的异步执行器）
-            4. 对执行结果逐个进行缓存
-            5. 合并结果并保持原始顺序
+            4. 对执行结果逐个进行缓存，并填充到对应索引位置
+            5. 返回按原始顺序排列的结果列表
         """
-        results: list[Any] = []
-        miss_cache_requests: list[dict] = []
+        # 初始化结果列表，长度与请求列表一致，使用 None 占位
+        results: list[Any] = [None] * len(request_list)
+        miss_cache_requests: list[tuple[int, dict]] = []  # (原始索引, 请求数据)
 
-        # 步骤1: 检查缓存状态
-        for request_data in request_list:
+        # 步骤1: 检查缓存状态，记录索引位置
+        for index, request_data in enumerate(request_list):
             cache_key = self._get_cache_key(request_data)
             if cache_key is None:
-                miss_cache_requests.append(request_data)
+                miss_cache_requests.append((index, request_data))
                 continue
 
             try:
@@ -564,24 +565,28 @@ class CacheClient(BaseClient):
                 cached = None
 
             if cached is None:
-                miss_cache_requests.append(request_data)
+                miss_cache_requests.append((index, request_data))
                 continue
 
-            results.append(cached)
+            # 缓存命中，直接存储到对应索引位置
+            results[index] = cached
 
         # 步骤2: 对未命中的请求调用原始方法执行（复用 BaseClient 的异步执行器）
         if miss_cache_requests:
-            executed_results = self._original_request(miss_cache_requests, is_async)
+            # 提取请求数据列表
+            miss_requests_data = [req_data for _, req_data in miss_cache_requests]
+            executed_results = self._original_request(miss_requests_data, is_async)
 
-            # 步骤3: 缓存结果并填充到对应位置
-            for result in executed_results:
+            # 步骤3: 缓存结果并填充到对应索引位置
+            for (original_index, _), result in zip(miss_cache_requests, executed_results):
                 if not isinstance(result, dict):
                     cache_key = None
                 else:
                     # cache_key 从Result中获取
                     cache_key = result.pop("cache_key", None)
 
-                results.append(result)
+                # 填充到原始索引位置
+                results[original_index] = result
 
                 if cache_key and self._should_cache_response(result):
                     try:

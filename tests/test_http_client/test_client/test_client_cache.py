@@ -293,6 +293,54 @@ class TestCacheClientBatchRequests:
         # 应该发送3次HTTP请求（id=1, id=2, id=3）
         assert len(responses.calls) == 3
 
+    @pytest.mark.unit
+    @responses.activate
+    def test_batch_requests_cache_order_preserved(self):
+        """测试批量请求缓存命中和未命中混合时保持顺序"""
+        # Arrange - 使用简单的 API 测试，通过参数区分
+        for i in range(1, 6):
+            responses.add(
+                responses.GET,
+                "https://api.example.com/users",
+                json={"id": i, "name": f"User{i}"},
+                status=200,
+            )
+        client = SimpleCacheAPIClient()
+
+        # Act - 第一次请求，缓存 id=1, 3, 5
+        # 使用不同的 page 参数来区分
+        results1 = client.request([{"page": 1}, {"page": 3}, {"page": 5}])
+        assert len(responses.calls) == 3
+        # 验证第一次的结果
+        assert all(r["result"] is True for r in results1)
+
+        # Act - 第二次请求，混合缓存命中(page=1,3,5)和未命中(page=2,4)
+        # 顺序: 1(缓存), 2(新), 3(缓存), 4(新), 5(缓存)
+        results2 = client.request(
+            [
+                {"page": 1},
+                {"page": 2},
+                {"page": 3},
+                {"page": 4},
+                {"page": 5},
+            ]
+        )
+
+        # Assert - 验证顺序保持正确
+        assert len(results2) == 5
+        # 验证所有请求都成功
+        assert all(r["result"] is True for r in results2)
+        # 验证只新增了2次HTTP请求(page=2和page=4)
+        assert len(responses.calls) == 5  # 3(first) + 2(second)
+
+        # 验证数据是按照顺序返回的
+        # 第一个(page=1)应该与第一次请求中的第一个相同
+        assert results2[0]["data"] == results1[0]["data"]
+        # 第三个(page=3)应该与第一次请求中的第二个相同
+        assert results2[2]["data"] == results1[1]["data"]
+        # 第五个(page=5)应该与第一次请求中的第三个相同
+        assert results2[4]["data"] == results1[2]["data"]
+
 
 class TestCacheClientCustomCacheCheck:
     """测试自定义缓存检查"""
