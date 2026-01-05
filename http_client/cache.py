@@ -15,6 +15,7 @@ import threading
 import time
 from collections import OrderedDict
 from typing import Any
+import base64
 
 import redis
 
@@ -149,19 +150,22 @@ class RedisCacheBackend(BaseCacheBackend):
     基于 Redis 的缓存后端
 
     使用 Redis 作为分布式缓存存储，支持多进程/多服务器共享缓存
-    自动处理 JSON 序列化和连接池管理
+    自动处理多种类型的序列化和连接池管理
 
     参数:
         host: Redis 服务器地址
         port: Redis 服务器端口
         db: Redis 数据库编号
         password: Redis 密码（可选）
-        key_prefix: 缓存键前缀，用于 clear 时只清理本应用的缓存
+        key_prefix: 缓存键前缀，用于隔离不同应用的缓存数据
         **kwargs: 其他 Redis 连接参数
     """
 
-    # JSON 序列化标记前缀，用于区分 JSON 数据和原始数据
+    # 类型标记前缀，用于区分不同类型的数据
     _JSON_MARKER = "__JSON__:"
+    _BYTES_MARKER = "__BYTES__:"
+    _NUMBER_MARKER = "__NUMBER__:"
+    _BOOL_MARKER = "__BOOL__:"
 
     def __init__(
         self,
@@ -183,58 +187,90 @@ class RedisCacheBackend(BaseCacheBackend):
             **kwargs,
         )
         self.client = redis.Redis(connection_pool=self.pool)
-        self.key_prefix = key_prefix
+        self.key_prefix = key_prefix.strip() if key_prefix else ""
+
+    def _make_key(self, key: str) -> str:
+        """生成带前缀的完整键名"""
+        if self.key_prefix:
+            return f"{self.key_prefix}:{key}"
+        return key
 
     def get(self, key: str) -> Any | None:
+        """获取缓存值，自动应用 key_prefix"""
+        full_key = self._make_key(key)
         try:
-            value = self.client.get(key)
+            value = self.client.get(full_key)
             if value is not None:
-                logger.debug(f"RedisCache hit for key: {key}")
+                logger.debug(f"RedisCache hit for key: {key} (full_key: {full_key})")
                 # redis-py 返回 bytes，先解码为字符串
                 value_str = value.decode("utf-8") if isinstance(value, bytes) else value
-                # 检查是否为 JSON 序列化的数据
+
+                # 根据标记反序列化
                 if value_str.startswith(self._JSON_MARKER):
                     json_data = value_str[len(self._JSON_MARKER) :]
                     return json.loads(json_data)
+                elif value_str.startswith(self._BYTES_MARKER):
+                    base64_data = value_str[len(self._BYTES_MARKER) :]
+                    return base64.b64decode(base64_data)
+                elif value_str.startswith(self._NUMBER_MARKER):
+                    number_data = value_str[len(self._NUMBER_MARKER) :]
+                    return json.loads(number_data)
+                elif value_str.startswith(self._BOOL_MARKER):
+                    bool_data = value_str[len(self._BOOL_MARKER) :]
+                    return json.loads(bool_data)
+                # 普通字符串
                 return value_str
-            logger.debug(f"RedisCache miss for key: {key}")
+            logger.debug(f"RedisCache miss for key: {key} (full_key: {full_key})")
             return None
         except redis.RedisError:
-            logger.exception(f"Redis error getting key '{key}'")
+            logger.exception(f"Redis error getting key '{key}' (full_key: {full_key})")
+            return None
+        except Exception:
+            logger.exception(f"Error deserializing value for key '{key}'")
             return None
 
     def set(self, key: str, value: Any, expire: int | None = None) -> None:
+        """设置缓存值，自动应用 key_prefix"""
+        full_key = self._make_key(key)
         try:
-            # 复杂类型使用 JSON 序列化并添加标记，简单类型直接转字符串
-            if isinstance(value, (dict, list, tuple)):
+            # 根据类型选择序列化策略
+            if isinstance(value, bool):
+                # bool 必须在 int 之前判断，因为 bool 是 int 的子类
+                serialized = self._BOOL_MARKER + json.dumps(value)
+            elif isinstance(value, (dict, list, tuple)):
                 serialized = self._JSON_MARKER + json.dumps(value, ensure_ascii=False)
             elif isinstance(value, bytes):
-                serialized = value.decode("utf-8")
+                serialized = self._BYTES_MARKER + base64.b64encode(value).decode("ascii")
+            elif isinstance(value, (int, float)):
+                serialized = self._NUMBER_MARKER + json.dumps(value)
             else:
+                # 普通字符串或其他类型，直接转字符串
                 serialized = str(value)
 
             if expire:
-                self.client.setex(key, expire, serialized)
+                self.client.setex(full_key, expire, serialized)
             else:
-                self.client.set(key, serialized)
+                self.client.set(full_key, serialized)
 
-            logger.debug(f"RedisCache set for key: {key}, expire: {expire}")
+            logger.debug(f"RedisCache set for key: {key} (full_key: {full_key}), expire: {expire}")
         except (TypeError, redis.RedisError):
-            logger.exception(f"Redis error setting key '{key}'")
+            logger.exception(f"Redis error setting key '{key}' (full_key: {full_key})")
 
     def delete(self, key: str) -> None:
+        """删除缓存项，自动应用 key_prefix"""
+        full_key = self._make_key(key)
         try:
-            self.client.delete(key)
-            logger.debug(f"RedisCache deleted key: {key}")
+            self.client.delete(full_key)
+            logger.debug(f"RedisCache deleted key: {key} (full_key: {full_key})")
         except redis.RedisError:
-            logger.exception(f"Redis error deleting key '{key}'")
+            logger.exception(f"Redis error deleting key '{key}' (full_key: {full_key})")
 
     def clear(self) -> None:
         """清空缓存，仅删除带有 key_prefix 前缀的键，避免影响其他数据"""
         try:
             if self.key_prefix:
                 # 使用 SCAN 迭代删除匹配前缀的键，避免阻塞
-                pattern = f"{self.key_prefix}*"
+                pattern = f"{self.key_prefix}:*"
                 cursor = 0
                 deleted_count = 0
                 while True:
@@ -257,7 +293,7 @@ class RedisCacheBackend(BaseCacheBackend):
         try:
             if self.key_prefix:
                 # 使用 SCAN 统计匹配的键数量
-                pattern = f"{self.key_prefix}*"
+                pattern = f"{self.key_prefix}:*"
                 count = 0
                 cursor = 0
                 while True:
@@ -278,6 +314,23 @@ class RedisCacheBackend(BaseCacheBackend):
         except redis.RedisError:
             logger.exception("Redis connection check failed")
             return False
+
+    def close(self) -> None:
+        """关闭 Redis 连接池，释放资源"""
+        try:
+            self.pool.disconnect()
+            logger.debug("Redis connection pool closed")
+        except Exception:
+            logger.exception("Failed to close Redis connection pool")
+
+    def __enter__(self):
+        """上下文管理器入口"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """上下文管理器退出，自动关闭连接"""
+        self.close()
+        return False
 
 
 def generate_cache_key(

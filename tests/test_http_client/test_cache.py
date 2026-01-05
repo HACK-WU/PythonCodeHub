@@ -312,3 +312,215 @@ class TestRedisCacheBackend:
         if isinstance(result, bytes):
             result = result.decode("utf-8")
         assert result == "value2"
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_key_prefix_isolation(self, fake_redis):
+        """测试 key_prefix 实现缓存隔离"""
+        # Arrange - 创建两个不同前缀的缓存实例
+        cache1 = RedisCacheBackend(key_prefix="app1")
+        cache1.client = fake_redis
+        cache2 = RedisCacheBackend(key_prefix="app2")
+        cache2.client = fake_redis
+
+        # Act - 在两个缓存中设置相同的键
+        cache1.set("key1", "value_from_app1")
+        cache2.set("key1", "value_from_app2")
+
+        # Assert - 应该互不影响
+        assert cache1.get("key1") == "value_from_app1"
+        assert cache2.get("key1") == "value_from_app2"
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_key_prefix_in_operations(self, fake_redis):
+        """测试所有操作都正确使用 key_prefix"""
+        # Arrange
+        cache = RedisCacheBackend(key_prefix="test_prefix")
+        cache.client = fake_redis
+
+        # Act
+        cache.set("mykey", "myvalue")
+
+        # Assert - 验证 Redis 中实际存储的键名包含前缀
+        assert fake_redis.exists("test_prefix:mykey") == 1
+        assert fake_redis.exists("mykey") == 0  # 不应该存在不带前缀的键
+
+        # Act - 通过缓存接口获取
+        result = cache.get("mykey")
+
+        # Assert
+        assert result == "myvalue"
+
+        # Act - 删除操作
+        cache.delete("mykey")
+
+        # Assert
+        assert fake_redis.exists("test_prefix:mykey") == 0
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_clear_with_prefix(self, fake_redis):
+        """测试 clear 只清理带前缀的键"""
+        # Arrange
+        cache = RedisCacheBackend(key_prefix="app1")
+        cache.client = fake_redis
+
+        # 手动在 Redis 中设置一些键
+        fake_redis.set("app1:key1", "value1")
+        fake_redis.set("app1:key2", "value2")
+        fake_redis.set("app2:key1", "value3")  # 其他应用的键
+        fake_redis.set("other_key", "value4")  # 无前缀的键
+
+        # Act
+        cache.clear()
+
+        # Assert - 只清理 app1 前缀的键
+        assert fake_redis.exists("app1:key1") == 0
+        assert fake_redis.exists("app1:key2") == 0
+        assert fake_redis.exists("app2:key1") == 1  # 不应该被清理
+        assert fake_redis.exists("other_key") == 1  # 不应该被清理
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_len_with_prefix(self, fake_redis):
+        """测试 __len__ 只统计带前缀的键"""
+        # Arrange
+        cache = RedisCacheBackend(key_prefix="app1")
+        cache.client = fake_redis
+
+        # Act
+        cache.set("key1", "value1")
+        cache.set("key2", "value2")
+        fake_redis.set("app2:key1", "value3")  # 其他应用的键
+
+        # Assert - 只统计 app1 前缀的键
+        assert len(cache) == 2
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_integer_serialization(self, redis_cache):
+        """测试整数类型的序列化和反序列化"""
+        # Arrange & Act
+        redis_cache.set("int_key", 12345)
+        result = redis_cache.get("int_key")
+
+        # Assert - 应该返回整数，不是字符串
+        assert result == 12345
+        assert isinstance(result, int)
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_float_serialization(self, redis_cache):
+        """测试浮点数类型的序列化和反序列化"""
+        # Arrange & Act
+        redis_cache.set("float_key", 3.14159)
+        result = redis_cache.get("float_key")
+
+        # Assert - 应该返回浮点数，不是字符串
+        assert result == 3.14159
+        assert isinstance(result, float)
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_boolean_serialization(self, redis_cache):
+        """测试布尔类型的序列化和反序列化"""
+        # Arrange & Act
+        redis_cache.set("bool_true", True)
+        redis_cache.set("bool_false", False)
+
+        result_true = redis_cache.get("bool_true")
+        result_false = redis_cache.get("bool_false")
+
+        # Assert - 应该返回布尔值，不是整数或字符串
+        assert result_true is True
+        assert isinstance(result_true, bool)
+        assert result_false is False
+        assert isinstance(result_false, bool)
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_bytes_serialization(self, redis_cache):
+        """测试 bytes 类型的序列化和反序列化"""
+        # Arrange
+        original_bytes = b"\x00\x01\x02\xff\xfe\xfd"
+
+        # Act
+        redis_cache.set("bytes_key", original_bytes)
+        result = redis_cache.get("bytes_key")
+
+        # Assert - 应该返回原始 bytes
+        assert result == original_bytes
+        assert isinstance(result, bytes)
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_chinese_string_serialization(self, redis_cache):
+        """测试中文字符串的序列化和反序列化"""
+        # Arrange
+        chinese_str = "你好，世界！这是测试字符串。"
+
+        # Act
+        redis_cache.set("chinese_key", chinese_str)
+        result = redis_cache.get("chinese_key")
+
+        # Assert
+        assert result == chinese_str
+        assert isinstance(result, str)
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_mixed_types_in_dict(self, redis_cache):
+        """测试字典中包含混合类型"""
+        # Arrange
+        mixed_dict = {
+            "string": "hello",
+            "int": 42,
+            "float": 3.14,
+            "bool": True,
+            "list": [1, 2, 3],
+            "nested": {"key": "value"},
+        }
+
+        # Act
+        redis_cache.set("mixed_key", mixed_dict)
+        result = redis_cache.get("mixed_key")
+
+        # Assert
+        assert result == mixed_dict
+        assert isinstance(result["int"], int)
+        assert isinstance(result["float"], float)
+        assert isinstance(result["bool"], bool)
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_context_manager(self, fake_redis):
+        """测试上下文管理器"""
+        # Arrange & Act
+        with RedisCacheBackend(key_prefix="test") as cache:
+            cache.client = fake_redis
+            cache.set("key1", "value1")
+            result = cache.get("key1")
+            assert result == "value1"
+        # 退出上下文后连接应该被关闭（这里无法直接验证，但不应该抛异常）
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_close_method(self, fake_redis):
+        """测试 close 方法"""
+        # Arrange
+        cache = RedisCacheBackend(key_prefix="test")
+        cache.client = fake_redis
+
+        # Act - 不应该抛出异常
+        cache.close()
+
+    @pytest.mark.unit
+    @pytest.mark.redis
+    def test_ping_method(self, redis_cache):
+        """测试 ping 方法"""
+        # Act
+        result = redis_cache.ping()
+
+        # Assert
+        assert result is True
