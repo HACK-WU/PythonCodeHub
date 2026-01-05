@@ -111,3 +111,4 @@ venv.bak/
 bkcodeai.json
 uv.lock
 test*.py
+!tests/**
