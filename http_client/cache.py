@@ -156,8 +156,12 @@ class RedisCacheBackend(BaseCacheBackend):
         port: Redis 服务器端口
         db: Redis 数据库编号
         password: Redis 密码（可选）
+        key_prefix: 缓存键前缀，用于 clear 时只清理本应用的缓存
         **kwargs: 其他 Redis 连接参数
     """
+
+    # JSON 序列化标记前缀，用于区分 JSON 数据和原始数据
+    _JSON_MARKER = "__JSON__:"
 
     def __init__(
         self,
@@ -165,6 +169,7 @@ class RedisCacheBackend(BaseCacheBackend):
         port=REDIS_DEFAULT_PORT,
         db=REDIS_DEFAULT_DB,
         password=None,
+        key_prefix: str = "cache_backend",
         **kwargs,
     ):
         # 使用连接池提高性能
@@ -178,18 +183,20 @@ class RedisCacheBackend(BaseCacheBackend):
             **kwargs,
         )
         self.client = redis.Redis(connection_pool=self.pool)
+        self.key_prefix = key_prefix
 
     def get(self, key: str) -> Any | None:
         try:
             value = self.client.get(key)
             if value is not None:
                 logger.debug(f"RedisCache hit for key: {key}")
-                try:
-                    # 尝试解析为JSON
-                    return json.loads(value)
-                except json.JSONDecodeError:
-                    # 原始字节数据
-                    return value
+                # redis-py 返回 bytes，先解码为字符串
+                value_str = value.decode("utf-8") if isinstance(value, bytes) else value
+                # 检查是否为 JSON 序列化的数据
+                if value_str.startswith(self._JSON_MARKER):
+                    json_data = value_str[len(self._JSON_MARKER) :]
+                    return json.loads(json_data)
+                return value_str
             logger.debug(f"RedisCache miss for key: {key}")
             return None
         except redis.RedisError:
@@ -198,14 +205,18 @@ class RedisCacheBackend(BaseCacheBackend):
 
     def set(self, key: str, value: Any, expire: int | None = None) -> None:
         try:
-            # 自动序列化JSON可序列化对象
-            if not isinstance(value, (bytes, str, int, float)):
-                value = json.dumps(value)
+            # 复杂类型使用 JSON 序列化并添加标记，简单类型直接转字符串
+            if isinstance(value, (dict, list, tuple)):
+                serialized = self._JSON_MARKER + json.dumps(value, ensure_ascii=False)
+            elif isinstance(value, bytes):
+                serialized = value.decode("utf-8")
+            else:
+                serialized = str(value)
 
             if expire:
-                self.client.setex(key, expire, value)
+                self.client.setex(key, expire, serialized)
             else:
-                self.client.set(key, value)
+                self.client.set(key, serialized)
 
             logger.debug(f"RedisCache set for key: {key}, expire: {expire}")
         except (TypeError, redis.RedisError):
@@ -219,11 +230,54 @@ class RedisCacheBackend(BaseCacheBackend):
             logger.exception(f"Redis error deleting key '{key}'")
 
     def clear(self) -> None:
+        """清空缓存，仅删除带有 key_prefix 前缀的键，避免影响其他数据"""
         try:
-            self.client.flushdb()
-            logger.debug("RedisCache cleared (current DB)")
+            if self.key_prefix:
+                # 使用 SCAN 迭代删除匹配前缀的键，避免阻塞
+                pattern = f"{self.key_prefix}*"
+                cursor = 0
+                deleted_count = 0
+                while True:
+                    cursor, keys = self.client.scan(cursor, match=pattern, count=100)
+                    if keys:
+                        self.client.delete(*keys)
+                        deleted_count += len(keys)
+                    if cursor == 0:
+                        break
+                logger.debug(f"RedisCache cleared {deleted_count} keys with prefix '{self.key_prefix}'")
+            else:
+                # 无前缀时清空整个数据库（谨慎使用）
+                self.client.flushdb()
+                logger.warning("RedisCache cleared entire DB (no key_prefix set)")
         except redis.RedisError:
             logger.exception("Redis error clearing cache")
+
+    def __len__(self) -> int:
+        """返回当前缓存条目数（仅统计带前缀的键）"""
+        try:
+            if self.key_prefix:
+                # 使用 SCAN 统计匹配的键数量
+                pattern = f"{self.key_prefix}*"
+                count = 0
+                cursor = 0
+                while True:
+                    cursor, keys = self.client.scan(cursor, match=pattern, count=100)
+                    count += len(keys)
+                    if cursor == 0:
+                        break
+                return count
+            return self.client.dbsize()
+        except redis.RedisError:
+            logger.exception("Redis error getting cache size")
+            return 0
+
+    def ping(self) -> bool:
+        """检查 Redis 连接是否正常"""
+        try:
+            return self.client.ping()
+        except redis.RedisError:
+            logger.exception("Redis connection check failed")
+            return False
 
 
 def generate_cache_key(
