@@ -291,8 +291,8 @@ class CacheClient(BaseClient):
         backend_kwargs = getattr(self, "cache_backend_kwargs", {})
         try:
             return self.cache_backend_class(**backend_kwargs)
-        except Exception:
-            logger.exception("Failed to initialize cache backend")
+        except Exception as e:
+            logger.exception(f"Failed to initialize cache backend: {e}")
             # 回退到内存缓存
             return InMemoryCacheBackend()
 
@@ -334,8 +334,8 @@ class CacheClient(BaseClient):
         if self._should_cache_response_func is not None:
             try:
                 return self._should_cache_response_func(result)
-            except Exception:
-                logger.exception("Custom should_cache_response_func failed, using default logic")
+            except Exception as e:
+                logger.exception(f"Custom should_cache_response_func failed, using default logic: {e}")
 
         # 使用默认逻辑
         return self.default_cache_response_check(result)
@@ -400,8 +400,8 @@ class CacheClient(BaseClient):
             cached = self.cache_backend.get(cache_key)
             if cached is not None:
                 return cached
-        except Exception:
-            logger.exception("Failed to get cache")
+        except Exception as e:
+            logger.exception(f"Failed to get cache: {e}")
 
         # 缓存未命中，执行请求
         logger.debug(f"Cache MISS for {request_data.get('endpoint')}")
@@ -410,8 +410,8 @@ class CacheClient(BaseClient):
         if self._should_cache_response(result):
             try:
                 self.cache_backend.set(cache_key, result, expire=self._cache_expire)
-            except Exception:
-                logger.exception("Failed to cache response")
+            except Exception as e:
+                logger.exception(f"Failed to cache response: {e}")
 
         return result
 
@@ -450,8 +450,8 @@ class CacheClient(BaseClient):
             try:
                 # 尝试获取缓存
                 cached = self.cache_backend.get(cache_key)
-            except Exception:
-                logger.exception("Failed to get cache")
+            except Exception as e:
+                logger.exception(f"Failed to get cache,{e}")
                 cached = None
 
             if cached is None:
@@ -477,8 +477,8 @@ class CacheClient(BaseClient):
                 if cache_key and self._should_cache_response(result):
                     try:
                         self.cache_backend.set(cache_key, result, expire=self._cache_expire)
-                    except Exception:
-                        logger.exception("Failed to cache response")
+                    except Exception as e:
+                        logger.exception(f"Failed to cache response,{e}")
 
         return results
 
@@ -497,8 +497,8 @@ class CacheClient(BaseClient):
                 try:
                     cache_key = str(cache_key)
                     self.cache_backend.set(cache_key, result, expire=self._cache_expire)
-                except Exception:
-                    logger.exception("Failed to refresh cache")
+                except Exception as e:
+                    logger.exception(f"Failed to refresh cache: {e}")
 
     def _uncached_request(
         self,
@@ -542,5 +542,5 @@ class CacheClient(BaseClient):
             else:
                 self.cache_backend.clear()
                 logger.info("Cache cleared")
-        except Exception:
-            logger.exception("Cache clear failed")
+        except Exception as e:
+            logger.exception(f"Cache clear failed: {e}")
