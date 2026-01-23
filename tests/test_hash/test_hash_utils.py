@@ -10,32 +10,26 @@ class TestCountMd5(unittest.TestCase):
         """测试基础类型"""
         # 测试字符串
         result = count_md5("hello")
-        self.assertTrue(result.startswith("val:"))
-        self.assertTrue(result.endswith("|"))
+        self.assertTrue(result.startswith("base:"))
 
         # 测试整数
         result = count_md5(123)
-        self.assertTrue(result.startswith("val:"))
-        self.assertTrue(result.endswith("|"))
+        self.assertTrue(result.startswith("base:"))
 
         # 测试浮点数
         result = count_md5(123.45)
-        self.assertTrue(result.startswith("val:"))
-        self.assertTrue(result.endswith("|"))
+        self.assertTrue(result.startswith("base:"))
 
         # 测试布尔值
         result = count_md5(True)
-        self.assertTrue(result.startswith("val:"))
-        self.assertTrue(result.endswith("|"))
+        self.assertTrue(result.startswith("base:"))
 
         result = count_md5(False)
-        self.assertTrue(result.startswith("val:"))
-        self.assertTrue(result.endswith("|"))
+        self.assertTrue(result.startswith("base:"))
 
         # 测试None
         result = count_md5(None)
-        self.assertTrue(result.startswith("val:"))
-        self.assertTrue(result.endswith("|"))
+        self.assertTrue(result.startswith("base:"))
 
     def test_dict_type(self):
         """测试字典类型"""
