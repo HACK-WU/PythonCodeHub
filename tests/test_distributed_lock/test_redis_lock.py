@@ -1,7 +1,7 @@
 """RedisLock 单元测试。
 
 通过 unittest.mock.MagicMock 模拟 Redis 客户端，验证锁的核心行为，
-无���启动真实 Redis 服务。
+无需启动真实 Redis 服务。
 """
 
 import unittest
@@ -35,46 +35,75 @@ class TestRedisLock(unittest.TestCase):
     def test_release_success(self):
         client = MagicMock()
         client.set.return_value = True
-        client.delete.return_value = 1
+        # Lua 脚本返回 1 表示成功删除
+        client.eval.return_value = 1
 
         lock = RedisLock("res-3", client=client)
         lock.acquire()
-        # GET 返回与本实例一致的 token
-        client.get.return_value = lock._token
 
         result = lock.release()
         self.assertEqual(result, 1)
-        client.delete.assert_called_once_with("res-3")
+        # 验证 eval 被正确调用（Lua 脚本, numkeys=1, key, token）
+        client.eval.assert_called_once()
+        call_args = client.eval.call_args[0]
+        self.assertEqual(call_args[1], 1)  # numkeys
+        self.assertEqual(call_args[2], "res-3")  # key
 
     def test_release_skip_when_token_mismatch(self):
-        # token 不匹配时不删除 key，防止误删
+        # Lua 脚本返回 0 表示 token 不匹配
         client = MagicMock()
         client.set.return_value = True
+        client.eval.return_value = 0
+
         lock = RedisLock("res-4", client=client)
         lock.acquire()
 
-        client.get.return_value = "other-token"
-        self.assertFalse(lock.release())
-        client.delete.assert_not_called()
+        result = lock.release()
+        self.assertEqual(result, 0)
 
     def test_release_skip_when_not_acquired(self):
-        # 未持锁直接释放应返回 False，且不调用 delete
+        # 未持锁直接释放应返回 False，且不调用 eval
         client = MagicMock()
         lock = RedisLock("res-5", client=client)
         self.assertFalse(lock.release())
-        client.delete.assert_not_called()
+        client.eval.assert_not_called()
+
+    def test_release_clears_token(self):
+        # release 后 _token 应被置空，防止重复释放
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.return_value = 1
+
+        lock = RedisLock("res-clear", client=client)
+        lock.acquire()
+        self.assertIsNotNone(lock._token)
+
+        lock.release()
+        self.assertIsNone(lock._token)
+
+        # 再次调用 release 应直接返回 False
+        self.assertFalse(lock.release())
 
     def test_with_statement(self):
         # with 语句应自动 acquire / release
         client = MagicMock()
         client.set.return_value = True
-        client.delete.return_value = 1
+        client.eval.return_value = 1
 
         lock = RedisLock("res-6", client=client)
         with lock as l:
             self.assertIs(l, lock)
-            client.get.return_value = lock._token
-        client.delete.assert_called_once_with("res-6")
+        client.eval.assert_called_once()
+
+    def test_with_statement_raises_on_failure(self):
+        # with 语句在加锁失败时应抛出 TimeoutError
+        client = MagicMock()
+        client.set.return_value = False
+
+        lock = RedisLock("res-fail", client=client)
+        with self.assertRaises(TimeoutError):
+            with lock:
+                pass  # 不应到达此处
 
     def test_client_required(self):
         # client 为 None 时必须抛出 ValueError

@@ -32,8 +32,13 @@ class BaseLock:
         raise NotImplementedError
 
     def __enter__(self):
-        """进入 with 代码块时自动获取锁，返回锁实例本身。"""
-        self.acquire()
+        """进入 with 代码块时自动获取锁，返回锁实例本身。
+
+        异常:
+            TimeoutError: 加锁失败时抛出，避免在未持锁的情况下执行临界区代码
+        """
+        if not self.acquire():
+            raise TimeoutError(f"Failed to acquire lock: {self.name}")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

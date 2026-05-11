@@ -1,9 +1,18 @@
 """基于 Redis Pipeline 的批量分布式锁。"""
 
 import uuid
+from types import TracebackType
 
 from .constants import DEFAULT_TTL
 from .protocols import RedisClientProtocol
+
+# Lua 脚本：原子化"校验 token → 删除 key"，与 RedisLock 共用同一逻辑
+_RELEASE_LUA = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+end
+return 0
+"""
 
 
 class MultiRedisLock:
@@ -16,7 +25,8 @@ class MultiRedisLock:
     - 通过依赖注入接受任意符合 RedisClientProtocol 的客户端
     - 所有 key 共享同一个 token，简化 token 管理
     - 加锁为"尽力而为"模式：部分 key 加锁失败不影响其他 key
-    - 释放时通过 MGET 批量校验 token，只删除本实例持有的 key
+    - 释放时通过 Lua 脚本逐个原子校验 token 并删除，杜绝误删他人锁的竞态条件
+    - 支持 with 语句自动加锁/释放
     """
 
     def __init__(self, keys: list[str], client: RedisClientProtocol, ttl: int | None = None):
@@ -44,7 +54,7 @@ class MultiRedisLock:
         """批量尝试获取锁（非阻塞）。
 
         返回值:
-            成功获取锁的 key 集合（set）；keys 为空时返回空列表
+            成功获取锁的 key 集合（set）；keys 为空时返回空 set
 
         执行步骤：
         1. 对 keys 去重，避免重复加锁
@@ -68,34 +78,34 @@ class MultiRedisLock:
             if locked:
                 self._lock_success_keys.add(keys[index])
 
-        return self._lock_success_keys
+        # 返回副本，防止外部修改内部状态
+        return set(self._lock_success_keys)
 
     def release(self):
-        """批量释放本实例持有的锁。
+        """批量释放本实例持有的锁（原子操作）。
+
+        通过 Lua 脚本逐个原子执行 "校验 token → 删除 key"，
+        避免 MGET + DELETE 之间的竞态条件。
 
         返回值:
             实际被删除的 key 列表；若无成功加锁的 key 则返回 None
 
         执行步骤：
         1. 若无成功加锁的 key，直接返回
-        2. 通过 MGET 批量读取各 key 的当前 token 值
-        3. 比对 token，仅删除 token 与本实例一致的 key，防止误释放他人的锁
+        2. 对每个成功加锁的 key，通过 Lua 脚本原子校验 token 并删除
+        3. 清空内部加锁记录
         """
         if not self._lock_success_keys:
             return
 
-        lock_success_keys = list(self._lock_success_keys)
+        keys_deleted = []
+        for key in list(self._lock_success_keys):
+            result = self.client.eval(_RELEASE_LUA, 1, key, self._token)
+            if result:
+                keys_deleted.append(key)
 
-        results = self.client.mget(lock_success_keys)
-
-        keys_to_delete = []
-        for index, token in enumerate(results):
-            if token == self._token:
-                keys_to_delete.append(lock_success_keys[index])
-
-        if keys_to_delete:
-            self.client.delete(*keys_to_delete)
-        return keys_to_delete
+        self._lock_success_keys.clear()
+        return keys_deleted
 
     def is_locked(self, key: str) -> bool:
         """查询指定 key 是否已被本实例成功加锁。
@@ -108,3 +118,14 @@ class MultiRedisLock:
             False — 该 key 未被本实例持有
         """
         return key in self._lock_success_keys
+
+    def __enter__(self):
+        """进入 with 代码块时批量获取锁，返回锁实例本身。"""
+        self.acquire()
+        return self
+
+    def __exit__(
+        self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: TracebackType | None
+    ):
+        """退出 with 代码块时自动释放所有已持有的锁。"""
+        self.release()

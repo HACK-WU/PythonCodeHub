@@ -22,15 +22,29 @@ class TestMultiRedisLock(unittest.TestCase):
         lock = MultiRedisLock(["k1", "k2", "k3"], client=client, ttl=10)
         success_keys = lock.acquire()
 
-        # 因为 acquire 中对 keys 做了 set 去重，顺序不确定
-        # 但由于 pipeline 接收的顺序就是 list(set(keys))，结果索引与之一致
+        self.assertIsInstance(success_keys, set)
         self.assertEqual(len(success_keys), 2)
         client.pipeline.assert_called_once_with(transaction=False)
+
+    def test_acquire_returns_copy(self):
+        # acquire 应返回副本，修改返回值不影响内部状态
+        pipeline = self._make_pipeline([True])
+        client = MagicMock()
+        client.pipeline.return_value = pipeline
+
+        lock = MultiRedisLock(["k1"], client=client)
+        result = lock.acquire()
+        result.add("injected-key")
+
+        # 内部状态不应被外部修改影响
+        self.assertNotIn("injected-key", lock._lock_success_keys)
 
     def test_acquire_empty_keys(self):
         client = MagicMock()
         lock = MultiRedisLock([], client=client)
-        self.assertEqual(lock.acquire(), [])
+        result = lock.acquire()
+        self.assertIsInstance(result, set)
+        self.assertEqual(result, set())
         client.pipeline.assert_not_called()
 
     def test_release_only_own_keys(self):
@@ -42,23 +56,35 @@ class TestMultiRedisLock(unittest.TestCase):
         lock = MultiRedisLock(["k1", "k2"], client=client)
         lock.acquire()
 
-        # mget 返回：第一个 token 与本实例一致，第二个被他人占用
-        success_keys_list = list(lock._lock_success_keys)
-        client.mget.return_value = [
-            lock._token if k == success_keys_list[0] else "other-token" for k in success_keys_list
-        ]
+        # 模拟 Lua 脚本：第一个 key 返回 1（token 匹配，成功删除），
+        # 第二个 key 返回 0（token 不匹配）
+        client.eval.side_effect = [1, 0]
 
         deleted = lock.release()
-        self.assertEqual(deleted, [success_keys_list[0]])
-        client.delete.assert_called_once_with(success_keys_list[0])
+        # 只有 eval 返回 1 的 key 被计入 deleted
+        self.assertEqual(len(deleted), 1)
+        self.assertEqual(client.eval.call_count, 2)
 
     def test_release_no_success_keys(self):
         client = MagicMock()
         lock = MultiRedisLock(["k1"], client=client)
         # 未调用 acquire，_lock_success_keys 为空
         self.assertIsNone(lock.release())
-        client.mget.assert_not_called()
-        client.delete.assert_not_called()
+        client.eval.assert_not_called()
+
+    def test_release_clears_internal_state(self):
+        # release 后内部 _lock_success_keys 应被清空
+        pipeline = self._make_pipeline([True])
+        client = MagicMock()
+        client.pipeline.return_value = pipeline
+        client.eval.return_value = 1
+
+        lock = MultiRedisLock(["k1"], client=client)
+        lock.acquire()
+        self.assertTrue(len(lock._lock_success_keys) > 0)
+
+        lock.release()
+        self.assertEqual(len(lock._lock_success_keys), 0)
 
     def test_is_locked(self):
         pipeline = self._make_pipeline([True, False])
@@ -75,6 +101,20 @@ class TestMultiRedisLock(unittest.TestCase):
         not_locked = (all_keys - set(success_keys)).pop()
         self.assertFalse(lock.is_locked(not_locked))
         self.assertFalse(lock.is_locked("not-exists"))
+
+    def test_with_statement(self):
+        # with 语句应自动 acquire / release
+        pipeline = self._make_pipeline([True, True])
+        client = MagicMock()
+        client.pipeline.return_value = pipeline
+        client.eval.return_value = 1
+
+        lock = MultiRedisLock(["k1", "k2"], client=client)
+        with lock as l:
+            self.assertIs(l, lock)
+            self.assertTrue(len(lock._lock_success_keys) > 0)
+        # 退出 with 后，release 被调用，内部状态清空
+        self.assertEqual(len(lock._lock_success_keys), 0)
 
     def test_client_required(self):
         with self.assertRaises(ValueError):

@@ -6,6 +6,15 @@ import uuid
 from .base import BaseLock
 from .protocols import RedisClientProtocol
 
+# Lua 脚本：原子化"校验 token → 删除 key"，避免 GET + DELETE 之间的竞态条件
+# 返回 1 表示成功删除，0 表示 token 不匹配（锁已被他人持有或已过期）
+_RELEASE_LUA = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+end
+return 0
+"""
+
 
 class RedisLock(BaseLock):
     """基于 Redis SET NX 指令实现的单键分布式互斥锁。
@@ -13,8 +22,9 @@ class RedisLock(BaseLock):
     特性：
     - 通过依赖注入接受任意符合 RedisClientProtocol 的客户端
     - 使用唯一 token（UUID）标识锁持有者，防止误释放他人持有的锁
-    - 支持短暂等待重试（_wait 参数），适用于轻度竞争场景
+    - 支持等待重试（timeout 参数）与可配置重试间隔（retry_interval）
     - 锁过期时间由 ttl 控制，避免持锁方崩溃导致死锁
+    - 释放锁通过 Lua 脚本保证原子性，杜绝误删他人锁的竞态条件
     """
 
     def __init__(self, name: str, client: RedisClientProtocol, ttl: int | None = None):
@@ -35,11 +45,12 @@ class RedisLock(BaseLock):
         # 当前实例持有的锁令牌；None 表示未持锁
         self._token: str | None = None
 
-    def acquire(self, _wait: float = 0.001) -> bool:
+    def acquire(self, _wait: float = 0.001, retry_interval: float = 0.01) -> bool:
         """尝试获取 Redis 分布式锁。
 
         参数:
-            _wait: 最长等待时间（秒），默认 0.001 秒；超时后返回 False
+            _wait:          最长等待时间（秒），默认 0.001 秒；超时后返回 False
+            retry_interval: 重试间隔（秒），默认 0.01 秒
 
         返回值:
             True  — 成功获取锁
@@ -57,7 +68,7 @@ class RedisLock(BaseLock):
         wait_until = time.time() + _wait
         while not self.client.set(self.name, token, ex=self.ttl, nx=True):
             if time.time() < wait_until:
-                time.sleep(0.01)
+                time.sleep(retry_interval)
             else:
                 return False
 
@@ -65,20 +76,20 @@ class RedisLock(BaseLock):
         return True
 
     def release(self):
-        """释放 Redis 分布式锁。
+        """释放 Redis 分布式锁（原子操作）。
+
+        通过 Lua 脚本在 Redis 端原子执行 "校验 token → 删除 key"，
+        避免先 GET 再 DELETE 导致的竞态条件（锁 TTL 过期后被他人获取，
+        本实例误删他人锁）。
 
         返回值:
-            True/非零  — 成功删除锁 key
-            False      — 未持锁或 token 不匹配（锁已被他人持有或已过期），不执行删除
-
-        执行步骤：
-        1. 检查本实例是否持有 token，未持锁直接返回 False
-        2. 从 Redis 读取当前锁的 token 值
-        3. 比对 token，仅当一致时才删除 key，防止误释放他人的锁
+            1      — 成功删除锁 key
+            0      — token 不匹配（锁已被他人持有或已过期）
+            False  — 本实例未持锁，不执行任何操作
         """
         if not self._token:
             return False
-        token = self.client.get(self.name)
-        if not token or token != self._token:
-            return False
-        return self.client.delete(self.name)
+        try:
+            return self.client.eval(_RELEASE_LUA, 1, self.name, self._token)
+        finally:
+            self._token = None

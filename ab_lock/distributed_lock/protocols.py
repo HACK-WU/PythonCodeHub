@@ -51,6 +51,10 @@ class RedisClientProtocol(Protocol):
         """MGET 命令，批量读取多个 key 的值，返回与输入顺序一致的列表。"""
         ...
 
+    def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Any:
+        """EVAL 命令，执行 Lua 脚本以保证多步操作的原子性。"""
+        ...
+
     def pipeline(self, transaction: bool = True) -> PipelineProtocol:
         """创建 Pipeline 对象用于批量执行命令；transaction=False 时为非事务模式。"""
         ...
