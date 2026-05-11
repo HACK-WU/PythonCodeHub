@@ -3,10 +3,12 @@
 import random
 import time
 import uuid
+from collections.abc import Callable
 
 from .base import BaseLock
 from .lua_scripts import RELEASE_LUA
 from .protocols import RedisClientProtocol
+from .watchdog import SyncWatchdog
 
 
 class RedisLock(BaseLock):
@@ -18,15 +20,30 @@ class RedisLock(BaseLock):
     - 支持等待重试（timeout 参数）与可配置重试间隔（retry_interval）
     - 锁过期时间由 ttl 控制，避免持锁方崩溃导致死锁
     - 释放锁通过 Lua 脚本保证原子性，杜绝误删他人锁的竞态条件
+    - 可选 watchdog 自动续期：长事务超过 TTL 也不会丢锁
     """
 
-    def __init__(self, name: str, client: RedisClientProtocol, ttl: int | None = None):
+    def __init__(
+        self,
+        name: str,
+        client: RedisClientProtocol,
+        ttl: int | None = None,
+        enable_watchdog: bool = False,
+        watchdog_interval: float | None = None,
+        on_lock_lost: Callable[[str], None] | None = None,
+    ):
         """初始化 Redis 单键锁。
 
         参数:
-            name:   锁的 Redis key 名称
-            client: 满足 RedisClientProtocol 协议的 Redis 客户端实例（必填）
-            ttl:    锁过期时间（秒），默认 60 秒
+            name:              锁的 Redis key 名称
+            client:            满足 RedisClientProtocol 协议的 Redis 客户端实例（必填）
+            ttl:               锁过期时间（秒），默认 60 秒
+            enable_watchdog:   是否启用看门狗自动续期，默认 False；
+                               启用后 acquire 成功会自动启动后台续期线程，
+                               release 时自动停止
+            watchdog_interval: 续期间隔（秒），默认 ttl/3
+            on_lock_lost:      锁丢失回调（续期发现 token 不匹配时触发），
+                               仅在 enable_watchdog=True 时生效
 
         异常:
             ValueError: 当 client 为 None 时抛出
@@ -37,6 +54,11 @@ class RedisLock(BaseLock):
         self.client = client
         # 当前实例持有的锁令牌；None 表示未持锁
         self._token: str | None = None
+        # 看门狗相关配置
+        self._enable_watchdog = enable_watchdog
+        self._watchdog_interval = watchdog_interval
+        self._on_lock_lost = on_lock_lost
+        self._watchdog: SyncWatchdog | None = None
 
     def acquire(self, _wait: float = 0, retry_interval: float = 0.01) -> bool:
         """尝试获取 Redis 分布式锁。
@@ -64,6 +86,26 @@ class RedisLock(BaseLock):
         while True:
             if self.client.set(self.name, token, ex=self.ttl, nx=True):
                 self._token = token
+                # 加锁成功后按需启动看门狗
+                if self._enable_watchdog:
+                    try:
+                        self._watchdog = SyncWatchdog(
+                            client=self.client,
+                            key=self.name,
+                            token=token,
+                            ttl=self.ttl,
+                            interval=self._watchdog_interval,
+                            on_lost=self._on_lock_lost,
+                        )
+                        self._watchdog.start()
+                    except Exception:
+                        # 看门狗启动失败：必须主动回滚已加的锁，避免锁泄漏到 TTL 过期
+                        self._watchdog = None
+                        try:
+                            self.client.eval(RELEASE_LUA, 1, self.name, token)
+                        finally:
+                            self._token = None
+                        raise
                 return True
             # 非阻塞或已超时：直接返回失败
             if time.monotonic() >= deadline:
@@ -78,12 +120,19 @@ class RedisLock(BaseLock):
         避免先 GET 再 DELETE 导致的竞态条件（锁 TTL 过期后被他人获取，
         本实例误删他人锁）。
 
+        若启用了看门狗，会先停止续期线程再删除 key，保证看门狗不会在
+        释放后继续尝试续期。
+
         返回值:
             1 — 成功删除锁 key
             0 — 本实例未持锁，或 token 不匹配（锁已被他人持有或已过期）
         """
         if not self._token:
             return 0
+        # 先停止看门狗，防止释放过程中仍在续期
+        if self._watchdog is not None:
+            self._watchdog.stop()
+            self._watchdog = None
         try:
             return int(self.client.eval(RELEASE_LUA, 1, self.name, self._token))
         finally:

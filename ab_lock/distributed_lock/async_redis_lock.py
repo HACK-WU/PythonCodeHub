@@ -17,10 +17,12 @@ import logging
 import random
 import time
 import uuid
+from collections.abc import Callable
 
 from .constants import DEFAULT_TTL
 from .lua_scripts import RELEASE_LUA
 from .protocols import AsyncRedisClientProtocol
+from .watchdog import AsyncWatchdog
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +47,24 @@ class AsyncRedisLock:
             await do_async_work()
     """
 
-    def __init__(self, name: str, client: AsyncRedisClientProtocol, ttl: int | None = None):
+    def __init__(
+        self,
+        name: str,
+        client: AsyncRedisClientProtocol,
+        ttl: int | None = None,
+        enable_watchdog: bool = False,
+        watchdog_interval: float | None = None,
+        on_lock_lost: Callable[[str], None] | None = None,
+    ):
         """初始化异步 Redis 单键锁。
 
         参数:
-            name:   锁的 Redis key 名称
-            client: 满足 AsyncRedisClientProtocol 协议的异步 Redis 客户端（必填）
-            ttl:    锁过期时间（秒），默认 60 秒
+            name:              锁的 Redis key 名称
+            client:            满足 AsyncRedisClientProtocol 协议的异步 Redis 客户端（必填）
+            ttl:               锁过期时间（秒），默认 60 秒
+            enable_watchdog:   是否启用看门狗自动续期，默认 False
+            watchdog_interval: 续期间隔（秒），默认 ttl/3
+            on_lock_lost:      锁丢失回调（续期失败时触发），仅在 enable_watchdog=True 时生效
 
         异常:
             ValueError: 当 client 为 None 时抛出
@@ -63,6 +76,11 @@ class AsyncRedisLock:
         self.ttl = ttl or DEFAULT_TTL
         # 当前实例持有的锁令牌；None 表示未持锁
         self._token: str | None = None
+        # 看门狗相关配置
+        self._enable_watchdog = enable_watchdog
+        self._watchdog_interval = watchdog_interval
+        self._on_lock_lost = on_lock_lost
+        self._watchdog: AsyncWatchdog | None = None
 
     async def acquire(self, _wait: float = 0, retry_interval: float = 0.01) -> bool:
         """异步尝试获取锁。
@@ -82,6 +100,26 @@ class AsyncRedisLock:
         while True:
             if await self.client.set(self.name, token, ex=self.ttl, nx=True):
                 self._token = token
+                # 加锁成功后按需启动看门狗
+                if self._enable_watchdog:
+                    try:
+                        self._watchdog = AsyncWatchdog(
+                            client=self.client,
+                            key=self.name,
+                            token=token,
+                            ttl=self.ttl,
+                            interval=self._watchdog_interval,
+                            on_lost=self._on_lock_lost,
+                        )
+                        await self._watchdog.start()
+                    except Exception:
+                        # 看门狗启动失败：主动回滚已加的锁，避免泄漏到 TTL 过期
+                        self._watchdog = None
+                        try:
+                            await self.client.eval(RELEASE_LUA, 1, self.name, token)
+                        finally:
+                            self._token = None
+                        raise
                 return True
             # 非阻塞或已超时：直接返回失败
             if time.monotonic() >= deadline:
@@ -95,6 +133,8 @@ class AsyncRedisLock:
         通过 Lua 脚本在 Redis 端原子执行"校验 token → 删除 key"，
         避免 GET + DELETE 之间的竞态条件。
 
+        若启用了看门狗，会先停止 Task 再删除 key。
+
         返回值:
             1 — 成功删除锁 key
             0 — 本实例未持锁，或 token 不匹配（锁已被他人持有或已过期）
@@ -105,6 +145,10 @@ class AsyncRedisLock:
         """
         if not self._token:
             return 0
+        # 先停止看门狗
+        if self._watchdog is not None:
+            await self._watchdog.stop()
+            self._watchdog = None
         try:
             result = await self.client.eval(RELEASE_LUA, 1, self.name, self._token)
             return int(result)
