@@ -8,6 +8,7 @@
 """
 
 from typing import Any, Protocol, runtime_checkable
+from collections.abc import Awaitable
 
 
 @runtime_checkable
@@ -57,4 +58,29 @@ class RedisClientProtocol(Protocol):
 
     def pipeline(self, transaction: bool = True) -> PipelineProtocol:
         """创建 Pipeline 对象用于批量执行命令；transaction=False 时为非事务模式。"""
+        ...
+
+
+@runtime_checkable
+class AsyncRedisClientProtocol(Protocol):
+    """异步 Redis 客户端接口契约。
+
+    用于 AsyncRedisLock，对应 redis-py 的 redis.asyncio.Redis、aioredis 等
+    异步客户端。所有方法返回 Awaitable，可被 await 调用。
+    """
+
+    def set(self, name: str, value: Any, ex: int | None = None, nx: bool = False) -> Awaitable[Any]:
+        """异步 SET 命令。"""
+        ...
+
+    def get(self, name: str) -> Awaitable[Any]:
+        """异步 GET 命令。"""
+        ...
+
+    def delete(self, *names: str) -> Awaitable[int]:
+        """异步 DEL 命令。"""
+        ...
+
+    def eval(self, script: str, numkeys: int, *keys_and_args: Any) -> Awaitable[Any]:
+        """异步 EVAL 命令，执行 Lua 脚本。"""
         ...

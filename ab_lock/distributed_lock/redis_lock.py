@@ -1,19 +1,12 @@
 """基于 Redis SET NX 的单键分布式互斥锁。"""
 
+import random
 import time
 import uuid
 
 from .base import BaseLock
+from .lua_scripts import RELEASE_LUA
 from .protocols import RedisClientProtocol
-
-# Lua 脚本：原子化"校验 token → 删除 key"，避免 GET + DELETE 之间的竞态条件
-# 返回 1 表示成功删除，0 表示 token 不匹配（锁已被他人持有或已过期）
-_RELEASE_LUA = """
-if redis.call("get", KEYS[1]) == ARGV[1] then
-    return redis.call("del", KEYS[1])
-end
-return 0
-"""
 
 
 class RedisLock(BaseLock):
@@ -45,12 +38,14 @@ class RedisLock(BaseLock):
         # 当前实例持有的锁令牌；None 表示未持锁
         self._token: str | None = None
 
-    def acquire(self, _wait: float = 0.001, retry_interval: float = 0.01) -> bool:
+    def acquire(self, _wait: float = 0, retry_interval: float = 0.01) -> bool:
         """尝试获取 Redis 分布式锁。
 
         参数:
-            _wait:          最长等待时间（秒），默认 0.001 秒；超时后返回 False
-            retry_interval: 重试间隔（秒），默认 0.01 秒
+            _wait:          最长等待时间（秒），默认 0 表示非阻塞，仅尝试一次；
+                            > 0 时在该时间窗口内按 retry_interval 轮询重试
+            retry_interval: 重试间隔（秒），默认 0.01 秒；实际等待会加入
+                            0.5x ~ 1.5x 的随机抖动以缓解多进程惊群
 
         返回值:
             True  — 成功获取锁
@@ -58,22 +53,23 @@ class RedisLock(BaseLock):
 
         执行步骤：
         1. 生成唯一 token，用于标识当前锁持有者
-        2. 计算等待截止时间
+        2. 计算等待截止时间（使用 monotonic，免受系统时钟回拨影响）
         3. 循环调用 SET NX 尝试加锁：
            - 成功则保存 token 并返回 True
-           - 失败且未超时则短暂 sleep 后重试
-           - 超时则返回 False
+           - 失败且已超时则返回 False
+           - 失败且未超时则 sleep 带抖动的 retry_interval 后重试
         """
         token = uuid.uuid4().hex
-        wait_until = time.time() + _wait
-        while not self.client.set(self.name, token, ex=self.ttl, nx=True):
-            if time.time() < wait_until:
-                time.sleep(retry_interval)
-            else:
+        deadline = time.monotonic() + _wait
+        while True:
+            if self.client.set(self.name, token, ex=self.ttl, nx=True):
+                self._token = token
+                return True
+            # 非阻塞或已超时：直接返回失败
+            if time.monotonic() >= deadline:
                 return False
-
-        self._token = token
-        return True
+            # 加入抖动避免多进程同时唤醒造成惊群
+            time.sleep(retry_interval * (0.5 + random.random()))
 
     def release(self):
         """释放 Redis 分布式锁（原子操作）。
@@ -83,13 +79,19 @@ class RedisLock(BaseLock):
         本实例误删他人锁）。
 
         返回值:
-            1      — 成功删除锁 key
-            0      — token 不匹配（锁已被他人持有或已过期）
-            False  — 本实例未持锁，不执行任何操作
+            1 — 成功删除锁 key
+            0 — 本实例未持锁，或 token 不匹配（锁已被他人持有或已过期）
         """
         if not self._token:
-            return False
+            return 0
         try:
-            return self.client.eval(_RELEASE_LUA, 1, self.name, self._token)
+            return int(self.client.eval(RELEASE_LUA, 1, self.name, self._token))
         finally:
             self._token = None
+
+    def is_locked(self) -> bool:
+        """查询本实例是否持有锁（仅看本地 token，不发起网络请求）。
+
+        注意：Redis 端可能因 TTL 过期已释放，强一致需直接查询 Redis。
+        """
+        return self._token is not None

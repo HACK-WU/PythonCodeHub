@@ -110,6 +110,44 @@ class TestRedisLock(unittest.TestCase):
         with self.assertRaises(ValueError):
             RedisLock("res-7", client=None)
 
+    def test_is_locked(self):
+        # is_locked 仅反映本地 token 状态
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.return_value = 1
+
+        lock = RedisLock("res-locked", client=client)
+        self.assertFalse(lock.is_locked())
+
+        lock.acquire()
+        self.assertTrue(lock.is_locked())
+
+        lock.release()
+        self.assertFalse(lock.is_locked())
+
+    def test_exit_preserves_original_exception_when_release_fails(self):
+        # 临界区有异常 + release 失败时，原始异常优先，不被覆盖
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.side_effect = ConnectionError("redis down")
+
+        lock = RedisLock("res-exit", client=client)
+        with self.assertRaises(ValueError) as cm:
+            with lock:
+                raise ValueError("business error")
+        self.assertEqual(str(cm.exception), "business error")
+
+    def test_exit_propagates_release_error_when_no_original_exception(self):
+        # 临界区无异常时，release 失败应正常向上抛出
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.side_effect = ConnectionError("redis down")
+
+        lock = RedisLock("res-exit-clean", client=client)
+        with self.assertRaises(ConnectionError):
+            with lock:
+                pass
+
 
 if __name__ == "__main__":
     unittest.main()

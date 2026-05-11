@@ -112,3 +112,4 @@ bkcodeai.json
 uv.lock
 test*.py
 !tests/**
+**/__pycache__/

@@ -1,6 +1,10 @@
 """分布式锁基类。"""
 
+import logging
+
 from .constants import DEFAULT_TTL
+
+logger = logging.getLogger(__name__)
 
 
 class BaseLock:
@@ -23,8 +27,15 @@ class BaseLock:
         self.name = name
         self.ttl = ttl or DEFAULT_TTL
 
-    def acquire(self, _wait=None):
-        """尝试获取锁，子类必须实现。"""
+    def acquire(self, _wait: float = 0) -> bool:
+        """尝试获取锁，子类必须实现。
+
+        参数:
+            _wait: 最长等待时间（秒），默认 0 表示非阻塞，仅尝试一次
+
+        返回值:
+            True 表示成功获取锁，False 表示等待超时未获取
+        """
         raise NotImplementedError
 
     def release(self):
@@ -42,5 +53,19 @@ class BaseLock:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """退出 with 代码块时自动释放锁，无论是否发生异常。"""
-        self.release()
+        """退出 with 代码块时自动释放锁。
+
+        异常处理策略：
+        - 临界区无异常时，release 异常正常向上抛出
+        - 临界区已有异常时，release 失败仅记录日志，不覆盖原始异常
+        """
+        try:
+            self.release()
+        except Exception:
+            if exc_type is None:
+                raise
+            logger.warning(
+                "release() failed during __exit__ for lock %s; preserving original exception",
+                self.name,
+                exc_info=True,
+            )
