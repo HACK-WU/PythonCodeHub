@@ -191,5 +191,40 @@ class TestAsyncWatchdog(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(lock._watchdog)
 
 
+# ──────────────────────────────────────────────────────
+# 本次修复引入的新增测试
+# ──────────────────────────────────────────────────────
+class TestAsyncWatchdogStartFailure(unittest.IsolatedAsyncioTestCase):
+    """验证 AsyncWatchdog.start 失败时 _stop_event 被正确清理。"""
+
+    async def test_start_failure_clears_stop_event(self):
+        # 模拟 create_task 失败（事件循环已关闭等场景）
+        # 由于在正常测试环境下 create_task 不会失败，通过 patch 模拟
+        client = MagicMock()
+
+        async def eval_return(*args, **kwargs):
+            return 1
+
+        client.eval = MagicMock(side_effect=eval_return)
+        dog = AsyncWatchdog(client, "res-start-fail", "tok", ttl=1, interval=0.05)
+
+        # 正常 start 应成功
+        await dog.start()
+        self.assertIsNotNone(dog._stop_event)
+        self.assertIsNotNone(dog._task)
+        await dog.stop()
+
+        # 模拟 create_task 抛异常
+        import asyncio as _asyncio
+
+        with unittest.mock.patch.object(_asyncio, "create_task", side_effect=RuntimeError("loop closed")):
+            dog2 = AsyncWatchdog(client, "res-start-fail2", "tok", ttl=1, interval=0.05)
+            with self.assertRaises(RuntimeError):
+                await dog2.start()
+            # _stop_event 应被清理为 None
+            self.assertIsNone(dog2._stop_event)
+            self.assertIsNone(dog2._task)
+
+
 if __name__ == "__main__":
     unittest.main()

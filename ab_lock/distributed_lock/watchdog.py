@@ -169,7 +169,12 @@ class AsyncWatchdog:
         if self._task is not None and not self._task.done():
             return
         self._stop_event = asyncio.Event()
-        self._task = asyncio.create_task(self._run(), name=f"watchdog-{self.key}")
+        try:
+            self._task = asyncio.create_task(self._run(), name=f"watchdog-{self.key}")
+        except Exception:
+            # create_task 失败（例如事件循环已关闭）：清理 _stop_event 防止脏状态
+            self._stop_event = None
+            raise
 
     async def stop(self):
         """停止看门狗（幂等）。

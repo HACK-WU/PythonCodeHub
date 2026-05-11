@@ -4,6 +4,7 @@
 不依赖真实 Redis。
 """
 
+import threading
 import unittest
 from unittest.mock import MagicMock
 
@@ -211,6 +212,166 @@ class TestRWLockValidation(unittest.TestCase):
     def test_client_required(self):
         with self.assertRaises(ValueError):
             RWLock("res", client=None)
+
+
+# ──────────────────────────────────────────────────────
+# 本次修复引入的新增测试
+# ──────────────────────────────────────────────────────
+class TestRWLockTokenLifecycle(unittest.TestCase):
+    """验证 token 在 acquire/release 周期中正确生成与清理。"""
+
+    def test_acquire_read_failure_clears_token(self):
+        # 读锁获取失败时，本地 token 应被清理
+        client = MagicMock()
+        client.eval.return_value = 0
+        rw = RWLock("res-tok-r-fail", client=client)
+
+        self.assertFalse(rw.acquire_read(_wait=0.01))
+        self.assertIsNone(rw._token)
+
+    def test_acquire_write_failure_clears_token(self):
+        # 写锁获取失败时，本地 token 应被清理
+        client = MagicMock()
+        client.eval.return_value = 0
+        rw = RWLock("res-tok-w-fail", client=client)
+
+        self.assertFalse(rw.acquire_write(_wait=0.01))
+        self.assertIsNone(rw._token)
+
+    def test_write_release_clears_token_when_no_read(self):
+        # 写锁释放后（无读锁），token 应被清理以便下次重新生成
+        client = MagicMock()
+        client.eval.return_value = 1
+        rw = RWLock("res-tok-w-rel", client=client)
+
+        rw.acquire_write()
+        self.assertIsNotNone(rw._token)
+        rw.release_write()
+        self.assertIsNone(rw._token)
+
+    def test_downgrade_failure_clears_token_and_state(self):
+        # 降级失败（Lua 返回 0）时，holds_write 和 token 都应被清理
+        client = MagicMock()
+        rw = RWLock("res-tok-dg-fail", client=client)
+
+        client.eval.return_value = 1
+        rw.acquire_write()
+        client.eval.return_value = 0  # 降级失败
+        self.assertFalse(rw.downgrade_to_read())
+        self.assertFalse(rw.holds_write)
+        self.assertIsNone(rw._token)
+        self.assertEqual(rw.read_count, 0)
+
+    def test_token_regenerated_on_new_acquire_cycle(self):
+        # 释放后再次获取，token 应该是新的
+        client = MagicMock()
+        client.eval.return_value = 1
+        rw = RWLock("res-tok-regen", client=client)
+
+        rw.acquire_read()
+        token1 = rw._token
+        rw.release_read()
+        self.assertIsNone(rw._token)
+
+        rw.acquire_read()
+        token2 = rw._token
+        self.assertNotEqual(token1, token2)
+
+
+class TestRWLockUpgradeWithWait(unittest.TestCase):
+    """验证 try_upgrade_to_write 在 _wait > 0 时的超时行为。"""
+
+    def test_upgrade_times_out_when_always_blocked(self):
+        # Lua 始终返回 0（有其他读者），_wait=0.05s 后超时返回 False
+        client = MagicMock()
+        rw = RWLock("res-upg-wait", client=client)
+
+        client.eval.return_value = 1
+        rw.acquire_read()
+        client.eval.return_value = 0  # 仍有其他读者
+
+        self.assertFalse(rw.try_upgrade_to_write(_wait=0.05, retry_interval=0.01))
+        # 读锁状态不变
+        self.assertEqual(rw.read_count, 1)
+        self.assertFalse(rw.holds_write)
+
+
+class TestRWLockThreadSafety(unittest.TestCase):
+    """验证 RLock 保护下的多线程并发安全性。"""
+
+    def test_concurrent_read_acquire_release(self):
+        # 多线程并发获取/释放读锁，token 不应串
+        client = MagicMock()
+        client.eval.return_value = 1
+        rw = RWLock("res-thread-r", client=client)
+
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(50):
+                    if rw.acquire_read(_wait=0.01):
+                        rw.release_read()
+            except Exception as e:
+                errors.append(str(e))
+
+        threads = [threading.Thread(target=worker) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+
+    def test_concurrent_write_acquire_release(self):
+        # 多线程并发获取/释放写锁
+        client = MagicMock()
+        client.eval.return_value = 1
+        rw = RWLock("res-thread-w", client=client)
+
+        errors = []
+
+        def worker():
+            try:
+                for _ in range(20):
+                    if rw.acquire_write(_wait=0.01):
+                        rw.release_write()
+            except Exception as e:
+                errors.append(str(e))
+
+        threads = [threading.Thread(target=worker) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+
+    def test_properties_thread_safe(self):
+        # 多线程并发读取 read_count / holds_write / is_locked 不应抛异常
+        client = MagicMock()
+        client.eval.return_value = 1
+        rw = RWLock("res-thread-prop", client=client)
+        rw.acquire_read()
+
+        errors = []
+
+        def reader():
+            try:
+                for _ in range(100):
+                    _ = rw.read_count
+                    _ = rw.holds_write
+                    _ = rw.is_locked()
+            except Exception as e:
+                errors.append(str(e))
+
+        threads = [threading.Thread(target=reader) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
 
 
 if __name__ == "__main__":

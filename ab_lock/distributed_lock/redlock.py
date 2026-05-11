@@ -36,6 +36,7 @@ import random
 import threading
 import time
 import uuid
+import warnings
 from collections.abc import Callable
 
 from .base import BaseLock
@@ -48,6 +49,10 @@ logger = logging.getLogger(__name__)
 # 有效持锁时间会扣除 elapsed + ttl * CLOCK_DRIFT_FACTOR，
 # 避免因系统时钟漂移导致实际过期比预期提前。
 CLOCK_DRIFT_FACTOR = 0.01
+
+# 看门狗 stop 时等待线程退出的最大秒数；与 SyncWatchdog.stop 默认值保持一致，
+# 避免 release 路径阻塞业务调用方过久。
+_WATCHDOG_JOIN_TIMEOUT = 1.0
 
 
 class Redlock(BaseLock):
@@ -78,7 +83,7 @@ class Redlock(BaseLock):
         ttl: int | None = None,
         retry_times: int = 3,
         retry_delay: float = 0.2,
-        node_timeout: float = 0.1,
+        node_timeout: float | None = None,
         enable_watchdog: bool = False,
         watchdog_interval: float | None = None,
         on_lock_lost: Callable[[str], None] | None = None,
@@ -91,10 +96,10 @@ class Redlock(BaseLock):
             ttl:               锁过期时间（秒），默认 60 秒
             retry_times:       加锁失败总重试次数，默认 3
             retry_delay:       重试间隔基数（秒），实际间隔会加入随机抖动
-            node_timeout:      单节点操作超时（秒），保留参数；当前依赖于 Redis 客户端
-                               自身的 socket_timeout 实现快速失败。算法内部通过
-                               `elapsed > ttl` 提前熔断防止整体被慢节点拖死，
-                               外部建议在构造客户端时显式设置较短的 socket_timeout。
+            node_timeout:      [已废弃] 单节点操作超时（秒）。当前实现不使用该参数，
+                               请在构造 Redis 客户端时显式设置 socket_timeout 控制单节点超时；
+                               算法内部通过 `elapsed > ttl` 提前熔断防止整体被慢节点拖死。
+                               传入非 None 值会触发 DeprecationWarning。
             enable_watchdog:   是否启用看门狗多节点自动续期，默认 False；
                                启用后 acquire 成功会启动后台续期线程，仅当多数派节点续期
                                成功才认为锁仍有效；否则触发 on_lock_lost 并停止看门狗
@@ -114,8 +119,16 @@ class Redlock(BaseLock):
         self.quorum = self.n // 2 + 1
         self.retry_times = retry_times
         self.retry_delay = retry_delay
-        self.node_timeout = node_timeout
+        if node_timeout is not None:
+            warnings.warn(
+                "Redlock.node_timeout is deprecated and has no effect; "
+                "configure socket_timeout on the underlying Redis client instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
 
+        # 共享状态保护锁：_token / _valid_until / _watchdog_* 均通过它互斥访问
+        self._state_lock = threading.Lock()
         self._token: str | None = None
         # 加锁成功后的有效截止时间（monotonic），None 表示未持锁
         self._valid_until: float | None = None
@@ -182,9 +195,13 @@ class Redlock(BaseLock):
                     if self._renew_instance(client, token, ttl_ms):
                         renewed += 1
                 if renewed >= self.quorum:
-                    # 多数派续期成功：延后本地有效截止时间
+                    # 多数派续期成功：延后本地有效截止时间（写共享状态需加锁）
                     valid_time = self.ttl - self.ttl * CLOCK_DRIFT_FACTOR
-                    self._valid_until = time.monotonic() + valid_time
+                    new_until = time.monotonic() + valid_time
+                    with self._state_lock:
+                        # 仅当 token 仍然属于本轮加锁结果时才更新；防止 release 后仍写入
+                        if self._token == token:
+                            self._valid_until = new_until
                 else:
                     logger.warning(
                         "redlock watchdog: lock %s lost (renewed %d/%d < quorum %d), stopping",
@@ -207,12 +224,15 @@ class Redlock(BaseLock):
         self._watchdog_thread.start()
 
     def _stop_watchdog(self):
-        """停止后台续期线程（幂等）。"""
+        """停止后台续期线程（幂等）。
+
+        join 超时固定为 _WATCHDOG_JOIN_TIMEOUT(1s)，避免 release 路径阻塞业务过久；
+        超时后由 daemon 线程自然结束，不影响主流程。
+        """
         if self._watchdog_stop is not None:
             self._watchdog_stop.set()
         if self._watchdog_thread is not None:
-            # release 路径不能无限期等待：超时后交由 daemon 线程自然结束
-            self._watchdog_thread.join(timeout=max(self.ttl, 1.0))
+            self._watchdog_thread.join(timeout=_WATCHDOG_JOIN_TIMEOUT)
         self._watchdog_thread = None
         self._watchdog_stop = None
 
@@ -230,9 +250,9 @@ class Redlock(BaseLock):
             True  — 多数派加锁成功，且扣除耗时后仍有足够的有效持锁时间
             False — 达到最大重试次数仍未成功
         """
-        token = uuid.uuid4().hex
-
         for attempt in range(self.retry_times):
+            # 每轮重新生成 token，避免上一轮回滚失败时残留 key 干扰本轮 SET NX
+            token = uuid.uuid4().hex
             start = time.monotonic()
 
             # 步骤 1：向所有节点尝试加锁
@@ -253,8 +273,9 @@ class Redlock(BaseLock):
 
             # 步骤 3：判断是否达到多数派 且 仍有有效持锁时间
             if len(success_clients) >= self.quorum and valid_time > 0:
-                self._token = token
-                self._valid_until = time.monotonic() + valid_time
+                with self._state_lock:
+                    self._token = token
+                    self._valid_until = time.monotonic() + valid_time
                 logger.debug(
                     "redlock acquired: name=%s quorum=%d/%d valid=%.3fs",
                     self.name,
@@ -270,8 +291,9 @@ class Redlock(BaseLock):
                         # 看门狗启动失败：主动回滚已加的锁，避免泄漏到 TTL 过期
                         for client in self.clients:
                             self._unlock_instance(client, token)
-                        self._token = None
-                        self._valid_until = None
+                        with self._state_lock:
+                            self._token = None
+                            self._valid_until = None
                         raise
                 return True
 
@@ -302,14 +324,18 @@ class Redlock(BaseLock):
         返回值:
             实际释放成功的节点数量（token 匹配并删除）
         """
-        if not self._token:
-            return 0
-        # 先停看门狗，避免释放过程中仍在续期
+        # 取出 token 并清空本地状态：必须在 _state_lock 内一次性完成，
+        # 防止 watchdog 线程在 release 期间继续写 _valid_until
+        with self._state_lock:
+            if not self._token:
+                return 0
+            token = self._token
+            self._token = None
+            self._valid_until = None
+
+        # 先停看门狗，避免释放过程中仍在续期（_state_lock 不持有，避免死锁）
         if self._watchdog_thread is not None:
             self._stop_watchdog()
-        token = self._token
-        self._token = None
-        self._valid_until = None
 
         released = 0
         for client in self.clients:
@@ -327,9 +353,10 @@ class Redlock(BaseLock):
         仅判断 token 是否存在以及 valid_until 是否未到期，
         不发起网络请求。
         """
-        if self._token is None or self._valid_until is None:
-            return False
-        return time.monotonic() < self._valid_until
+        with self._state_lock:
+            if self._token is None or self._valid_until is None:
+                return False
+            return time.monotonic() < self._valid_until
 
     @property
     def valid_until(self) -> float | None:
@@ -338,4 +365,5 @@ class Redlock(BaseLock):
         业务侧可用 `lock.valid_until - time.monotonic()` 判断剩余时间，
         避免在锁即将过期时仍执行耗时操作。
         """
-        return self._valid_until
+        with self._state_lock:
+            return self._valid_until

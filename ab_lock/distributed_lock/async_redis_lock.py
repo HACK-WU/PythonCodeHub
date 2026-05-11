@@ -99,8 +99,8 @@ class AsyncRedisLock:
         deadline = time.monotonic() + _wait
         while True:
             if await self.client.set(self.name, token, ex=self.ttl, nx=True):
-                self._token = token
-                # 加锁成功后按需启动看门狗
+                # 加锁成功后按需启动看门狗；看门狗启动成功后再写入 _token，
+                # 避免启动失败时还要回滚 _token（杜绝中间态泄漏）
                 if self._enable_watchdog:
                     try:
                         self._watchdog = AsyncWatchdog(
@@ -115,11 +115,9 @@ class AsyncRedisLock:
                     except Exception:
                         # 看门狗启动失败：主动回滚已加的锁，避免泄漏到 TTL 过期
                         self._watchdog = None
-                        try:
-                            await self.client.eval(RELEASE_LUA, 1, self.name, token)
-                        finally:
-                            self._token = None
+                        await self.client.eval(RELEASE_LUA, 1, self.name, token)
                         raise
+                self._token = token
                 return True
             # 非阻塞或已超时：直接返回失败
             if time.monotonic() >= deadline:

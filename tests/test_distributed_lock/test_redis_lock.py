@@ -149,5 +149,33 @@ class TestRedisLock(unittest.TestCase):
                 pass
 
 
+# ──────────────────────────────────────────────────────
+# 本次修复引入的新增测试
+# ──────────────────────────────────────────────────────
+class TestRedisLockWatchdogRollback(unittest.TestCase):
+    """验证看门狗启动失败时的回滚逻辑：_token 不应被写入。"""
+
+    def test_watchdog_start_failure_no_token_leak(self):
+        # 模拟看门狗启动失败：SyncWatchdog.__init__ 中 interval >= ttl 触发 ValueError
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.return_value = 1
+
+        lock = RedisLock(
+            "res-wd-rollback",
+            client=client,
+            ttl=1,
+            enable_watchdog=True,
+            watchdog_interval=5.0,  # interval > ttl → ValueError
+        )
+        with self.assertRaises(ValueError):
+            lock.acquire()
+
+        # 看门狗启动失败后 _token 应为 None（修复前会泄漏）
+        self.assertIsNone(lock._token)
+        # Redis 端应收到 DEL 回滚
+        client.eval.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main()

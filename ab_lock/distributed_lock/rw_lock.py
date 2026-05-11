@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import random
+import threading
 import time
 import uuid
 from contextlib import contextmanager
@@ -197,6 +198,17 @@ class RWLock:
     - 不同实例的读锁可共存
     - 写锁完全独占
     - 升级需确保当前只有自己一个读者，否则需等待或放弃
+
+    线程安全：
+    - 实例级方法通过 threading.RLock 互斥保护本地状态（_token / _read_count
+      / _holds_write），可在多线程间共享同一个 RWLock 实例
+    - 跨进程一致性由 Redis Lua 脚本保证
+
+    ⚠ 升级活锁警告：
+    - 若两个不同实例同时持有读锁，并都调用 try_upgrade_to_write 等待，
+      会出现互相等待对方释放的活锁。该方法在 _wait > 0 时仅做带超时的轮询，
+      不保证一定能升级成功；调用方应妥善处理 False 返回（典型做法：先
+      release_read 再 acquire_write，接受短暂无锁窗口）。
     """
 
     def __init__(self, name: str, client: RedisClientProtocol, ttl: int | None = None):
@@ -215,6 +227,9 @@ class RWLock:
         self.name = name
         self.client = client
         self.ttl = ttl or DEFAULT_TTL
+        # 本地共享状态保护锁：保证同一进程多线程访问 _token / _read_count /
+        # _holds_write 时的原子性，使用 RLock 以兼容嵌套调用（如 with 内再加锁）
+        self._lock = threading.RLock()
         # 实例 token：在首次 acquire_read / acquire_write 时才生成，
         # 避免多轮 acquire/release 周期复用 token 导致与 Redis 端状态错位。
         # 升级 / 降级场景下该 token 会被延续使用。
@@ -224,8 +239,8 @@ class RWLock:
         # 本地是否持有写锁
         self._holds_write: bool = False
 
-    def _ensure_token(self) -> str:
-        """首次加锁时生成 token；重入 / 升降级复用现有 token。"""
+    def _ensure_token_locked(self) -> str:
+        """在已持 _lock 的前提下，首次加锁时生成 token；其余场景复用现有 token。"""
         if self._token is None:
             self._token = uuid.uuid4().hex
         return self._token
@@ -244,21 +259,24 @@ class RWLock:
             True  — 获取成功
             False — 被写锁阻塞且超时
         """
-        # 首次加锁时才生成 token，避免多轮周期复用造成本地 / Redis 状态不一致
-        if self._read_count == 0 and not self._holds_write:
-            self._token = uuid.uuid4().hex
-        token = self._token
+        # 加锁初始化 token：首次加锁时生成，避免多轮周期复用造成本地 / Redis 状态不一致
+        with self._lock:
+            if self._read_count == 0 and not self._holds_write:
+                self._token = uuid.uuid4().hex
+            token = self._token
         ttl_ms = self.ttl * 1000
         deadline = time.monotonic() + _wait
         while True:
             result = self.client.eval(_ACQUIRE_READ_LUA, 1, self.name, token, ttl_ms)
             if int(result) == 1:
-                self._read_count += 1
+                with self._lock:
+                    self._read_count += 1
                 return True
             if time.monotonic() >= deadline:
                 # 首次加锁就失败：Redis 端没有任何 token 记录，本地 token 也应释放以便下次重新生成
-                if self._read_count == 0 and not self._holds_write:
-                    self._token = None
+                with self._lock:
+                    if self._read_count == 0 and not self._holds_write:
+                        self._token = None
                 return False
             time.sleep(retry_interval * (0.5 + random.random()))
 
@@ -273,28 +291,31 @@ class RWLock:
         异常:
             RuntimeError: 本地读计数已为 0 仍调用
         """
-        if self._read_count <= 0:
-            raise RuntimeError(f"release_read called without holding read lock: {self.name}")
-        if self._token is None:
-            raise RuntimeError(f"release_read called without active token: {self.name}")
+        with self._lock:
+            if self._read_count <= 0:
+                raise RuntimeError(f"release_read called without holding read lock: {self.name}")
+            if self._token is None:
+                raise RuntimeError(f"release_read called without active token: {self.name}")
+            token = self._token
         ttl_ms = self.ttl * 1000
-        result = int(self.client.eval(_RELEASE_READ_LUA, 1, self.name, self._token, ttl_ms))
-        if result == -1:
-            # Redis 端已不存在（TTL 过期 或 被外部清理）：
-            # 强制清零本地计数与 token，避免后续调用被默默忽略
-            self._read_count = 0
-            if not self._holds_write:
-                self._token = None
-        elif result == 0:
-            # Hash 已被 Lua 整体删除（本实例是最后一个读者）：
-            # 无论之前重入几次，本地计数都应一次性清零
-            self._read_count = 0
-            if not self._holds_write:
-                self._token = None
-        else:
-            self._read_count -= 1
-            if self._read_count == 0 and not self._holds_write:
-                self._token = None
+        result = int(self.client.eval(_RELEASE_READ_LUA, 1, self.name, token, ttl_ms))
+        with self._lock:
+            if result == -1:
+                # Redis 端已不存在（TTL 过期 或 被外部清理）：
+                # 强制清零本地计数与 token，避免后续调用被默默忽略
+                self._read_count = 0
+                if not self._holds_write:
+                    self._token = None
+            elif result == 0:
+                # Hash 已被 Lua 整体删除（本实例是最后一个读者）：
+                # 无论之前重入几次，本地计数都应一次性清零
+                self._read_count = 0
+                if not self._holds_write:
+                    self._token = None
+            else:
+                self._read_count -= 1
+                if self._read_count == 0 and not self._holds_write:
+                    self._token = None
         return result
 
     # ─────────────────────────────────────────────────────
@@ -311,20 +332,22 @@ class RWLock:
             True  — 获取成功
             False — 被任何读 / 写锁阻塞且超时
         """
-        # 首次加锁时才生成 token，避免多轮周期复用导致状态错位
-        if self._read_count == 0 and not self._holds_write:
-            self._token = uuid.uuid4().hex
-        token = self._token
+        with self._lock:
+            if self._read_count == 0 and not self._holds_write:
+                self._token = uuid.uuid4().hex
+            token = self._token
         ttl_ms = self.ttl * 1000
         deadline = time.monotonic() + _wait
         while True:
             result = self.client.eval(_ACQUIRE_WRITE_LUA, 1, self.name, token, ttl_ms)
             if int(result) == 1:
-                self._holds_write = True
+                with self._lock:
+                    self._holds_write = True
                 return True
             if time.monotonic() >= deadline:
-                if self._read_count == 0 and not self._holds_write:
-                    self._token = None
+                with self._lock:
+                    if self._read_count == 0 and not self._holds_write:
+                        self._token = None
                 return False
             time.sleep(retry_interval * (0.5 + random.random()))
 
@@ -338,15 +361,18 @@ class RWLock:
         异常:
             RuntimeError: 本地未持写锁仍调用
         """
-        if not self._holds_write:
-            raise RuntimeError(f"release_write called without holding write lock: {self.name}")
-        if self._token is None:
-            raise RuntimeError(f"release_write called without active token: {self.name}")
-        result = int(self.client.eval(_RELEASE_WRITE_LUA, 1, self.name, self._token))
-        self._holds_write = False
-        # 写锁释放后若本地不再持有任何锁，清理 token以便下次重新生成
-        if self._read_count == 0:
-            self._token = None
+        with self._lock:
+            if not self._holds_write:
+                raise RuntimeError(f"release_write called without holding write lock: {self.name}")
+            if self._token is None:
+                raise RuntimeError(f"release_write called without active token: {self.name}")
+            token = self._token
+        result = int(self.client.eval(_RELEASE_WRITE_LUA, 1, self.name, token))
+        with self._lock:
+            self._holds_write = False
+            # 写锁释放后若本地不再持有任何锁，清理 token 以便下次重新生成
+            if self._read_count == 0:
+                self._token = None
         return result
 
     # ─────────────────────────────────────────────────────
@@ -364,29 +390,35 @@ class RWLock:
         异常:
             RuntimeError: 本地未持写锁
         """
-        if not self._holds_write:
-            raise RuntimeError(f"downgrade_to_read called without holding write lock: {self.name}")
-        if self._token is None:
-            raise RuntimeError(f"downgrade_to_read called without active token: {self.name}")
+        with self._lock:
+            if not self._holds_write:
+                raise RuntimeError(f"downgrade_to_read called without holding write lock: {self.name}")
+            if self._token is None:
+                raise RuntimeError(f"downgrade_to_read called without active token: {self.name}")
+            token = self._token
         ttl_ms = self.ttl * 1000
-        result = int(self.client.eval(_DOWNGRADE_LUA, 1, self.name, self._token, ttl_ms))
-        if result == 1:
+        result = int(self.client.eval(_DOWNGRADE_LUA, 1, self.name, token, ttl_ms))
+        with self._lock:
+            if result == 1:
+                self._holds_write = False
+                self._read_count += 1
+                return True
+            # 降级失败（不应发生；除非 Redis 端状态被篡改 / TTL 过期）：
+            # 本地视为已失去锁，清理 token 与状态，避免后续操作错位
             self._holds_write = False
-            self._read_count += 1
-            return True
-        # 降级失败（不应发生；除非 Redis 端状态被篡改 / TTL 过期）：
-        # 本地视为已失去锁，清理 token 与状态，避免后续操作错位
-        self._holds_write = False
-        self._token = None
-        return False
+            self._token = None
+            return False
 
     def try_upgrade_to_write(self, _wait: float = 0, retry_interval: float = 0.01) -> bool:
         """读锁 → 写锁（原子升级）。
 
         **仅当本 token 是当前唯一的读者**时才会成功。
         如果还有其他读者：
-        - _wait > 0: 在该时间窗口内轮询重试，等其他读者释放
-        - _wait = 0: 立即返回 False，调用方可选择“resease_read + acquire_write”（会有无锁窗口期）
+        - _wait > 0: 在该时间窗口内带抖动轮询重试，等其他读者释放
+                     ⚠ 注意：若另一实例同时调用本方法，将出现升级活锁，
+                     双方都会等到 _wait 超时返回 False
+        - _wait = 0: 立即返回 False，调用方可选择 "release_read + acquire_write"
+                     （会有短暂无锁窗口期，但避免活锁）
 
         参数:
             _wait:          最长等待时间（秒）
@@ -399,18 +431,21 @@ class RWLock:
         异常:
             RuntimeError: 本地未持读锁
         """
-        if self._read_count <= 0:
-            raise RuntimeError(f"try_upgrade_to_write called without holding read lock: {self.name}")
-        if self._token is None:
-            raise RuntimeError(f"try_upgrade_to_write called without active token: {self.name}")
+        with self._lock:
+            if self._read_count <= 0:
+                raise RuntimeError(f"try_upgrade_to_write called without holding read lock: {self.name}")
+            if self._token is None:
+                raise RuntimeError(f"try_upgrade_to_write called without active token: {self.name}")
+            token = self._token
         ttl_ms = self.ttl * 1000
         deadline = time.monotonic() + _wait
         while True:
-            result = int(self.client.eval(_UPGRADE_LUA, 1, self.name, self._token, ttl_ms))
+            result = int(self.client.eval(_UPGRADE_LUA, 1, self.name, token, ttl_ms))
             if result == 1:
                 # 升级成功：清零本地读计数（对应 Lua 中的 HDEL），设置写持有标记
-                self._read_count = 0
-                self._holds_write = True
+                with self._lock:
+                    self._read_count = 0
+                    self._holds_write = True
                 return True
             if time.monotonic() >= deadline:
                 return False
@@ -445,13 +480,16 @@ class RWLock:
     @property
     def read_count(self) -> int:
         """本实例当前持有的读锁重入计数。"""
-        return self._read_count
+        with self._lock:
+            return self._read_count
 
     @property
     def holds_write(self) -> bool:
         """本实例是否持有写锁。"""
-        return self._holds_write
+        with self._lock:
+            return self._holds_write
 
     def is_locked(self) -> bool:
         """本实例是否持有任何锁（读或写）。"""
-        return self._read_count > 0 or self._holds_write
+        with self._lock:
+            return self._read_count > 0 or self._holds_write
