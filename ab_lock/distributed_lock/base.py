@@ -27,11 +27,11 @@ class BaseLock:
         self.name = name
         self.ttl = ttl or DEFAULT_TTL
 
-    def acquire(self, _wait: float = 0) -> bool:
+    def acquire(self, wait: float = 0) -> bool:
         """尝试获取锁，子类必须实现。
 
         参数:
-            _wait: 最长等待时间（秒），默认 0 表示非阻塞，仅尝试一次
+            wait: 最长等待时间（秒），默认 0 表示非阻塞，仅尝试一次
 
         返回值:
             True 表示成功获取锁，False 表示等待超时未获取

@@ -239,11 +239,11 @@ class Redlock(BaseLock):
     # ─────────────────────────────────────────────────────
     # 公开 API
     # ─────────────────────────────────────────────────────
-    def acquire(self, _wait: float = 0) -> bool:
+    def acquire(self, wait: float = 0) -> bool:
         """尝试在多数派实例上加锁。
 
         参数:
-            _wait: 兼容 BaseLock 接口的等待时间（未使用；Redlock 使用
+            wait: 兼容 BaseLock 接口的等待时间（未使用；Redlock 使用
                    retry_times / retry_delay 控制重试）
 
         返回值:

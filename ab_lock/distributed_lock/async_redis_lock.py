@@ -34,7 +34,7 @@ class AsyncRedisLock:
     - 完全异步：所有 IO 通过 await 执行，不阻塞事件循环
     - 通过依赖注入接受任意符合 AsyncRedisClientProtocol 的客户端
     - 使用唯一 token（UUID）标识锁持有者，防止误释放
-    - 支持等待重试（_wait 参数）与可配置重试间隔（含抖动）
+    - 支持等待重试（wait 参数）与可配置重试间隔（含抖动）
     - 释放锁通过 Lua 脚本保证原子性
 
     示例::
@@ -82,11 +82,11 @@ class AsyncRedisLock:
         self._on_lock_lost = on_lock_lost
         self._watchdog: AsyncWatchdog | None = None
 
-    async def acquire(self, _wait: float = 0, retry_interval: float = 0.01) -> bool:
+    async def acquire(self, wait: float = 0, retry_interval: float = 0.01) -> bool:
         """异步尝试获取锁。
 
         参数:
-            _wait:          最长等待时间（秒），默认 0 表示非阻塞，仅尝试一次；
+            wait:           最长等待时间（秒），默认 0 表示非阻塞，仅尝试一次；
                             > 0 时在该时间窗口内按 retry_interval 轮询重试
             retry_interval: 重试间隔（秒），默认 0.01 秒；实际等待会加入
                             0.5x ~ 1.5x 的随机抖动以缓解惊群
@@ -94,36 +94,64 @@ class AsyncRedisLock:
         返回值:
             True  — 成功获取锁
             False — 在等待时间内未能获取锁
+
+        异常:
+            RuntimeError: 当本实例已持有锁时（防止重复 acquire 覆盖 _token）
         """
+        # 防止对同一实例重复 acquire 导致 _token 被覆盖、旧 watchdog 误报
+        if self._token is not None:
+            raise RuntimeError(f"AsyncRedisLock {self.name!r} is already acquired by this instance")
+
         token = uuid.uuid4().hex
-        deadline = time.monotonic() + _wait
+        deadline = time.monotonic() + wait
         while True:
             if await self.client.set(self.name, token, ex=self.ttl, nx=True):
-                # 加锁成功后按需启动看门狗；看门狗启动成功后再写入 _token，
-                # 避免启动失败时还要回滚 _token（杜绝中间态泄漏）
-                if self._enable_watchdog:
-                    try:
-                        self._watchdog = AsyncWatchdog(
-                            client=self.client,
-                            key=self.name,
-                            token=token,
-                            ttl=self.ttl,
-                            interval=self._watchdog_interval,
-                            on_lost=self._on_lock_lost,
-                        )
-                        await self._watchdog.start()
-                    except Exception:
-                        # 看门狗启动失败：主动回滚已加的锁，避免泄漏到 TTL 过期
-                        self._watchdog = None
-                        await self.client.eval(RELEASE_LUA, 1, self.name, token)
-                        raise
+                # 加锁成功后按需启动看门狗；启动失败会原子回滚已加的锁
+                await self._start_watchdog_or_rollback(token)
                 self._token = token
                 return True
             # 非阻塞或已超时：直接返回失败
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 return False
-            # 加入抖动避免多协程同时唤醒造成惊群
-            await asyncio.sleep(retry_interval * (0.5 + random.random()))
+            # 加入抖动避免惊群；同时不允许 sleep 超过剩余 deadline
+            await asyncio.sleep(min(remaining, retry_interval * (0.5 + random.random())))
+
+    async def _start_watchdog_or_rollback(self, token: str):
+        """按配置启动看门狗；启动失败则原子回滚 Redis 端已加的锁。
+
+        参数:
+            token: 当前 acquire 周期生成的 token，用于回滚 RELEASE_LUA 校验
+
+        步骤：
+        1. 未启用 watchdog 直接返回
+        2. 创建并启动 AsyncWatchdog
+        3. 启动失败：清空 _watchdog，并尽力释放 Redis 端锁；
+           回滚 release 异常仅记录日志，避免遮蔽原始启动异常
+        """
+        if not self._enable_watchdog:
+            return
+        try:
+            self._watchdog = AsyncWatchdog(
+                client=self.client,
+                key=self.name,
+                token=token,
+                ttl=self.ttl,
+                interval=self._watchdog_interval,
+                on_lost=self._on_lock_lost,
+            )
+            await self._watchdog.start()
+        except Exception:
+            self._watchdog = None
+            try:
+                await self.client.eval(RELEASE_LUA, 1, self.name, token)
+            except Exception:
+                # 回滚释放失败仅记日志，保留原始启动异常向上抛
+                logger.exception(
+                    "rollback release failed for %s after watchdog start error",
+                    self.name,
+                )
+            raise
 
     async def release(self) -> int:
         """异步释放锁（原子操作）。
@@ -131,7 +159,8 @@ class AsyncRedisLock:
         通过 Lua 脚本在 Redis 端原子执行"校验 token → 删除 key"，
         避免 GET + DELETE 之间的竞态条件。
 
-        若启用了看门狗，会先停止 Task 再删除 key。
+        若启用了看门狗，会先停止 Task 再删除 key；watchdog stop 异常
+        不阻断后续 release，避免 Redis 端锁泄漏到 TTL 过期。
 
         返回值:
             1 — 成功删除锁 key
@@ -143,13 +172,28 @@ class AsyncRedisLock:
         """
         if not self._token:
             return 0
-        # 先停止看门狗
+        # 先停止看门狗：失败仅记录日志，不能因为 stop 异常而跳过 RELEASE_LUA
         if self._watchdog is not None:
-            await self._watchdog.stop()
-            self._watchdog = None
+            try:
+                await self._watchdog.stop()
+            except Exception:
+                logger.warning(
+                    "watchdog stop failed during release for %s; continuing release",
+                    self.name,
+                    exc_info=True,
+                )
+            finally:
+                self._watchdog = None
         try:
             result = await self.client.eval(RELEASE_LUA, 1, self.name, self._token)
-            return int(result)
+            # 容忍 None / bytes / str 等返回，避免 int(None) 抛 TypeError
+            if result is None:
+                return 0
+            try:
+                return 1 if int(result) == 1 else 0
+            except (TypeError, ValueError):
+                logger.warning("unexpected RELEASE_LUA result for %s: %r", self.name, result)
+                return 0
         finally:
             self._token = None
 

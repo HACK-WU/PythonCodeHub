@@ -34,7 +34,7 @@ class TestAsyncRedisLock(unittest.IsolatedAsyncioTestCase):
         client.set.return_value = False
 
         lock = AsyncRedisLock("res-2", client=client)
-        self.assertFalse(await lock.acquire(_wait=0.01))
+        self.assertFalse(await lock.acquire(wait=0.01))
 
     async def test_release_success(self):
         client = AsyncMock()
@@ -129,24 +129,24 @@ class TestAsyncRedisLock(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(lock.is_locked())
 
     async def test_acquire_non_blocking_only_tries_once(self):
-        # _wait=0 默认非阻塞：失败后只调用一次 set，不进入 sleep
+        # wait=0 默认非阻塞：失败后只调用一次 set，不进入 sleep
         client = AsyncMock()
         client.set.return_value = False
 
         lock = AsyncRedisLock("res-nb", client=client)
-        result = await lock.acquire()  # 默认 _wait=0
+        result = await lock.acquire()  # 默认 wait=0
 
         self.assertFalse(result)
         self.assertEqual(client.set.call_count, 1)
 
     async def test_acquire_retries_within_wait_window(self):
-        # _wait > 0 时，首次失败后应重试，需能看到多次 set 调用
+        # wait > 0 时，首次失败后应重试，需能看到多次 set 调用
         client = AsyncMock()
         # 前两次失败，第三次成功
         client.set.side_effect = [False, False, True]
 
         lock = AsyncRedisLock("res-retry", client=client)
-        result = await lock.acquire(_wait=0.1, retry_interval=0.005)
+        result = await lock.acquire(wait=0.1, retry_interval=0.005)
 
         self.assertTrue(result)
         self.assertEqual(client.set.call_count, 3)

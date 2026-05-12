@@ -30,7 +30,7 @@ class TestRedisLock(unittest.TestCase):
         client.set.return_value = False
 
         lock = RedisLock("res-2", client=client)
-        self.assertFalse(lock.acquire(_wait=0.01))
+        self.assertFalse(lock.acquire(wait=0.01))
 
     def test_release_success(self):
         client = MagicMock()
@@ -175,6 +175,128 @@ class TestRedisLockWatchdogRollback(unittest.TestCase):
         self.assertIsNone(lock._token)
         # Redis 端应收到 DEL 回滚
         client.eval.assert_called()
+
+
+# ──────────────────────────────────────────────────────
+# P0/P1 修复新增测试
+# ──────────────────────────────────────────────────────
+class TestRedisLockDuplicateAcquire(unittest.TestCase):
+    """#2 防止重复 acquire 覆盖 _token。"""
+
+    def test_duplicate_acquire_raises_runtime_error(self):
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.return_value = 1
+
+        lock = RedisLock("res-dup", client=client)
+        lock.acquire()
+        with self.assertRaises(RuntimeError):
+            lock.acquire()
+        lock.release()
+
+    def test_acquire_allowed_after_release(self):
+        # release 后应可以重新 acquire
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.return_value = 1
+
+        lock = RedisLock("res-reacquire", client=client)
+        lock.acquire()
+        lock.release()
+        self.assertTrue(lock.acquire())
+        lock.release()
+
+
+class TestRedisLockReleaseWatchdogStopFailure(unittest.TestCase):
+    """#1 release 中 watchdog.stop() 失败不阻断 RELEASE_LUA。"""
+
+    def test_watchdog_stop_failure_still_releases_redis_lock(self):
+        import time
+        from unittest.mock import patch
+
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.return_value = 1
+
+        lock = RedisLock(
+            "res-stop-fail",
+            client=client,
+            ttl=10,
+            enable_watchdog=True,
+            watchdog_interval=0.05,
+        )
+        lock.acquire()
+        time.sleep(0.1)
+
+        with patch.object(lock._watchdog, "stop", side_effect=RuntimeError("stop failed")):
+            result = lock.release()
+
+        self.assertEqual(result, 1)
+        self.assertIsNone(lock._token)
+        self.assertIsNone(lock._watchdog)
+
+
+class TestRedisLockReleaseNoneResult(unittest.TestCase):
+    """#5 release 返回值 None 安全，不抛 TypeError。"""
+
+    def test_release_returns_zero_when_eval_returns_none(self):
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.return_value = None
+
+        lock = RedisLock("res-none", client=client)
+        lock.acquire()
+        self.assertEqual(lock.release(), 0)
+        self.assertIsNone(lock._token)
+
+    def test_release_returns_zero_when_eval_returns_unexpected_str(self):
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.return_value = "unexpected"
+
+        lock = RedisLock("res-str", client=client)
+        lock.acquire()
+        self.assertEqual(lock.release(), 0)
+
+
+class TestRedisLockAcquireSleepDeadline(unittest.TestCase):
+    """#6 sleep 不越过 deadline，wait 严格生效。"""
+
+    def test_acquire_respects_wait_deadline(self):
+        import time
+
+        client = MagicMock()
+        client.set.return_value = False  # 始终失败
+
+        lock = RedisLock("res-deadline", client=client)
+        wait = 0.1
+        start = time.monotonic()
+        lock.acquire(wait=wait, retry_interval=0.5)  # retry_interval 远大于 wait
+        elapsed = time.monotonic() - start
+
+        self.assertLess(elapsed, wait + 0.05)
+
+
+class TestRedisLockWatchdogRollbackReleaseFails(unittest.TestCase):
+    """#7 watchdog 启动失败时，回滚 RELEASE_LUA 也失败，原始异常仍向上抛。"""
+
+    def test_rollback_release_failure_preserves_original_exception(self):
+        client = MagicMock()
+        client.set.return_value = True
+        client.eval.side_effect = ConnectionError("redis down")
+
+        lock = RedisLock(
+            "res-rollback-fail",
+            client=client,
+            ttl=1,
+            enable_watchdog=True,
+            watchdog_interval=5.0,  # 触发 ValueError
+        )
+        # 原始异常（ValueError）应向上抛，而非被 ConnectionError 覆盖
+        with self.assertRaises(ValueError):
+            lock.acquire()
+
+        self.assertIsNone(lock._token)
 
 
 if __name__ == "__main__":

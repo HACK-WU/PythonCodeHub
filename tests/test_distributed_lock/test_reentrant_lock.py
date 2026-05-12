@@ -43,7 +43,7 @@ class TestReentrantRedisLock(unittest.TestCase):
         client.eval.return_value = 0
 
         lock = ReentrantRedisLock("res-3", client=client)
-        self.assertFalse(lock.acquire(_wait=0.01))
+        self.assertFalse(lock.acquire(wait=0.01))
         self.assertEqual(lock.lock_count, 0)
         self.assertFalse(lock.is_locked())
 

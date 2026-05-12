@@ -38,7 +38,7 @@ class TestRWLockRead(unittest.TestCase):
         client.eval.return_value = 0
         rw = RWLock("res-r3", client=client)
 
-        self.assertFalse(rw.acquire_read(_wait=0.01))
+        self.assertFalse(rw.acquire_read(wait=0.01))
         self.assertEqual(rw.read_count, 0)
 
     def test_release_read_decrements_count(self):
@@ -87,7 +87,7 @@ class TestRWLockWrite(unittest.TestCase):
         client.eval.return_value = 0
         rw = RWLock("res-w2", client=client)
 
-        self.assertFalse(rw.acquire_write(_wait=0.01))
+        self.assertFalse(rw.acquire_write(wait=0.01))
         self.assertFalse(rw.holds_write)
 
     def test_release_write(self):
@@ -193,7 +193,7 @@ class TestRWLockContextManagers(unittest.TestCase):
         rw = RWLock("res-ctx-fail", client=client)
 
         with self.assertRaises(TimeoutError):
-            with rw.read_lock(_wait=0.01):
+            with rw.read_lock(wait=0.01):
                 pass
 
     def test_write_lock_releases_on_exception(self):
@@ -226,7 +226,7 @@ class TestRWLockTokenLifecycle(unittest.TestCase):
         client.eval.return_value = 0
         rw = RWLock("res-tok-r-fail", client=client)
 
-        self.assertFalse(rw.acquire_read(_wait=0.01))
+        self.assertFalse(rw.acquire_read(wait=0.01))
         self.assertIsNone(rw._token)
 
     def test_acquire_write_failure_clears_token(self):
@@ -235,7 +235,7 @@ class TestRWLockTokenLifecycle(unittest.TestCase):
         client.eval.return_value = 0
         rw = RWLock("res-tok-w-fail", client=client)
 
-        self.assertFalse(rw.acquire_write(_wait=0.01))
+        self.assertFalse(rw.acquire_write(wait=0.01))
         self.assertIsNone(rw._token)
 
     def test_write_release_clears_token_when_no_read(self):
@@ -279,10 +279,10 @@ class TestRWLockTokenLifecycle(unittest.TestCase):
 
 
 class TestRWLockUpgradeWithWait(unittest.TestCase):
-    """验证 try_upgrade_to_write 在 _wait > 0 时的超时行为。"""
+    """验证 try_upgrade_to_write 在 wait > 0 时的超时行为。"""
 
     def test_upgrade_times_out_when_always_blocked(self):
-        # Lua 始终返回 0（有其他读者），_wait=0.05s 后超时返回 False
+        # Lua 始终返回 0（有其他读者），wait=0.05s 后超时返回 False
         client = MagicMock()
         rw = RWLock("res-upg-wait", client=client)
 
@@ -290,7 +290,7 @@ class TestRWLockUpgradeWithWait(unittest.TestCase):
         rw.acquire_read()
         client.eval.return_value = 0  # 仍有其他读者
 
-        self.assertFalse(rw.try_upgrade_to_write(_wait=0.05, retry_interval=0.01))
+        self.assertFalse(rw.try_upgrade_to_write(wait=0.05, retry_interval=0.01))
         # 读锁状态不变
         self.assertEqual(rw.read_count, 1)
         self.assertFalse(rw.holds_write)
@@ -310,7 +310,7 @@ class TestRWLockThreadSafety(unittest.TestCase):
         def worker():
             try:
                 for _ in range(50):
-                    if rw.acquire_read(_wait=0.01):
+                    if rw.acquire_read(wait=0.01):
                         rw.release_read()
             except Exception as e:
                 errors.append(str(e))
@@ -334,7 +334,7 @@ class TestRWLockThreadSafety(unittest.TestCase):
         def worker():
             try:
                 for _ in range(20):
-                    if rw.acquire_write(_wait=0.01):
+                    if rw.acquire_write(wait=0.01):
                         rw.release_write()
             except Exception as e:
                 errors.append(str(e))

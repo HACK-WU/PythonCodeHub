@@ -206,7 +206,7 @@ class RWLock:
 
     ⚠ 升级活锁警告：
     - 若两个不同实例同时持有读锁，并都调用 try_upgrade_to_write 等待，
-      会出现互相等待对方释放的活锁。该方法在 _wait > 0 时仅做带超时的轮询，
+    会出现互相等待对方释放的活锁。该方法在 wait > 0 时仅做带超时的轮询，
       不保证一定能升级成功；调用方应妥善处理 False 返回（典型做法：先
       release_read 再 acquire_write，接受短暂无锁窗口）。
     """
@@ -248,11 +248,11 @@ class RWLock:
     # ─────────────────────────────────────────────────────
     # 读锁
     # ─────────────────────────────────────────────────────
-    def acquire_read(self, _wait: float = 0, retry_interval: float = 0.01) -> bool:
+    def acquire_read(self, wait: float = 0, retry_interval: float = 0.01) -> bool:
         """获取读锁（共享）。
 
         参数:
-            _wait:          最长等待时间（秒），0 表示仅尝试一次
+            wait:           最长等待时间（秒），0 表示仅尝试一次
             retry_interval: 重试间隔（秒），加入抖动缓解惊群
 
         返回值:
@@ -265,7 +265,7 @@ class RWLock:
                 self._token = uuid.uuid4().hex
             token = self._token
         ttl_ms = self.ttl * 1000
-        deadline = time.monotonic() + _wait
+        deadline = time.monotonic() + wait
         while True:
             result = self.client.eval(_ACQUIRE_READ_LUA, 1, self.name, token, ttl_ms)
             if int(result) == 1:
@@ -321,11 +321,11 @@ class RWLock:
     # ─────────────────────────────────────────────────────
     # 写锁
     # ─────────────────────────────────────────────────────
-    def acquire_write(self, _wait: float = 0, retry_interval: float = 0.01) -> bool:
+    def acquire_write(self, wait: float = 0, retry_interval: float = 0.01) -> bool:
         """获取写锁（独占）。
 
         参数:
-            _wait:          最长等待时间（秒），0 表示仅尝试一次
+            wait:           最长等待时间（秒），0 表示仅尝试一次
             retry_interval: 重试间隔（秒），加入抖动缓解惊群
 
         返回值:
@@ -337,7 +337,7 @@ class RWLock:
                 self._token = uuid.uuid4().hex
             token = self._token
         ttl_ms = self.ttl * 1000
-        deadline = time.monotonic() + _wait
+        deadline = time.monotonic() + wait
         while True:
             result = self.client.eval(_ACQUIRE_WRITE_LUA, 1, self.name, token, ttl_ms)
             if int(result) == 1:
@@ -409,19 +409,19 @@ class RWLock:
             self._token = None
             return False
 
-    def try_upgrade_to_write(self, _wait: float = 0, retry_interval: float = 0.01) -> bool:
+    def try_upgrade_to_write(self, wait: float = 0, retry_interval: float = 0.01) -> bool:
         """读锁 → 写锁（原子升级）。
 
         **仅当本 token 是当前唯一的读者**时才会成功。
         如果还有其他读者：
-        - _wait > 0: 在该时间窗口内带抖动轮询重试，等其他读者释放
-                     ⚠ 注意：若另一实例同时调用本方法，将出现升级活锁，
-                     双方都会等到 _wait 超时返回 False
-        - _wait = 0: 立即返回 False，调用方可选择 "release_read + acquire_write"
+        - wait > 0: 在该时间窗口内带抖动轮询重试，等其他读者释放
+                    ⚠ 注意：若另一实例同时调用本方法，将出现升级活锁，
+                    双方都会等到 wait 超时返回 False
+        - wait = 0: 立即返回 False，调用方可选择 "release_read + acquire_write"
                      （会有短暂无锁窗口期，但避免活锁）
 
         参数:
-            _wait:          最长等待时间（秒）
+            wait:           最长等待时间（秒）
             retry_interval: 重试间隔（秒），加入抖动缓解惊群
 
         返回值:
@@ -438,7 +438,7 @@ class RWLock:
                 raise RuntimeError(f"try_upgrade_to_write called without active token: {self.name}")
             token = self._token
         ttl_ms = self.ttl * 1000
-        deadline = time.monotonic() + _wait
+        deadline = time.monotonic() + wait
         while True:
             result = int(self.client.eval(_UPGRADE_LUA, 1, self.name, token, ttl_ms))
             if result == 1:
@@ -455,9 +455,9 @@ class RWLock:
     # 上下文管理器（with 语法糖）
     # ─────────────────────────────────────────────────────
     @contextmanager
-    def read_lock(self, _wait: float = 0) -> Iterator[RWLock]:
+    def read_lock(self, wait: float = 0) -> Iterator[RWLock]:
         """`with rw.read_lock():` 自动获取/释放读锁。"""
-        if not self.acquire_read(_wait=_wait):
+        if not self.acquire_read(wait=wait):
             raise TimeoutError(f"Failed to acquire read lock: {self.name}")
         try:
             yield self
@@ -465,9 +465,9 @@ class RWLock:
             self.release_read()
 
     @contextmanager
-    def write_lock(self, _wait: float = 0) -> Iterator[RWLock]:
+    def write_lock(self, wait: float = 0) -> Iterator[RWLock]:
         """`with rw.write_lock():` 自动获取/释放写锁。"""
-        if not self.acquire_write(_wait=_wait):
+        if not self.acquire_write(wait=wait):
             raise TimeoutError(f"Failed to acquire write lock: {self.name}")
         try:
             yield self
