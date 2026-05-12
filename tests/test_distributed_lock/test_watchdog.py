@@ -226,5 +226,243 @@ class TestAsyncWatchdogStartFailure(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(dog2._task)
 
 
+# ──────────────────────────────────────────────────────
+# 本次全面修复新增的边界测试
+# ──────────────────────────────────────────────────────
+from ab_lock.distributed_lock.watchdog import _parse_renew_result  # noqa: E402
+
+
+class TestParseRenewResult(unittest.TestCase):
+    """验证 _parse_renew_result 对各种返回值的鲁棒解析。"""
+
+    def test_int_one_is_success(self):
+        self.assertTrue(_parse_renew_result(1))
+
+    def test_int_zero_is_failure(self):
+        self.assertFalse(_parse_renew_result(0))
+
+    def test_none_is_failure(self):
+        self.assertFalse(_parse_renew_result(None))
+
+    def test_bytes_one_is_success(self):
+        self.assertTrue(_parse_renew_result(b"1"))
+
+    def test_str_one_is_success(self):
+        self.assertTrue(_parse_renew_result("1"))
+
+    def test_unparseable_is_failure(self):
+        self.assertFalse(_parse_renew_result("not-a-number"))
+        self.assertFalse(_parse_renew_result(object()))
+
+
+class TestSyncWatchdogParameterValidation(unittest.TestCase):
+    """验证 SyncWatchdog 构造参数的边界校验。"""
+
+    def test_ttl_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            SyncWatchdog(MagicMock(), "k", "t", ttl=0)
+        with self.assertRaises(ValueError):
+            SyncWatchdog(MagicMock(), "k", "t", ttl=-1)
+
+    def test_ttl_must_be_int(self):
+        with self.assertRaises(ValueError):
+            SyncWatchdog(MagicMock(), "k", "t", ttl=None)  # type: ignore[arg-type]
+
+    def test_interval_zero_rejected(self):
+        with self.assertRaises(ValueError):
+            SyncWatchdog(MagicMock(), "k", "t", ttl=10, interval=0)
+
+    def test_interval_negative_rejected(self):
+        with self.assertRaises(ValueError):
+            SyncWatchdog(MagicMock(), "k", "t", ttl=10, interval=-0.5)
+
+    def test_interval_ge_ttl_rejected(self):
+        with self.assertRaises(ValueError):
+            SyncWatchdog(MagicMock(), "k", "t", ttl=1, interval=2)
+
+    def test_max_renew_failures_must_be_at_least_one(self):
+        with self.assertRaises(ValueError):
+            SyncWatchdog(MagicMock(), "k", "t", ttl=10, interval=1, max_renew_failures=0)
+
+
+class TestSyncWatchdogConsecutiveFailures(unittest.TestCase):
+    """验证连续续期 RPC 失败超过阈值时触发 on_lost。"""
+
+    def test_consecutive_failures_trigger_on_lost(self):
+        client = MagicMock()
+        client.eval.side_effect = ConnectionError("network down")
+        callback = MagicMock()
+
+        dog = SyncWatchdog(
+            client,
+            "res-fail",
+            "tok",
+            ttl=10,
+            interval=0.02,
+            on_lost=callback,
+            max_renew_failures=2,
+        )
+        dog.start()
+        # 等待至少 2 次连续失败（约 0.04s + 容错）
+        time.sleep(0.2)
+        dog.stop()
+
+        callback.assert_called_once_with("res-fail")
+
+    def test_failures_reset_on_success(self):
+        # 一次失败后立即成功，不应触发 on_lost
+        client = MagicMock()
+        call_count = [0]
+
+        def eval_side(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise ConnectionError("flaky")
+            return 1  # 后续都成功
+
+        client.eval.side_effect = eval_side
+        callback = MagicMock()
+
+        dog = SyncWatchdog(
+            client,
+            "res-recover",
+            "tok",
+            ttl=10,
+            interval=0.02,
+            on_lost=callback,
+            max_renew_failures=2,
+        )
+        dog.start()
+        time.sleep(0.2)
+        dog.stop()
+
+        callback.assert_not_called()
+
+
+class TestSyncWatchdogStopSuppressesOnLost(unittest.TestCase):
+    """验证主动 stop 后即使 RPC 返回 0 也不触发 on_lost 误报。"""
+
+    def test_stop_during_inflight_renew_no_callback(self):
+        # 模拟续期 RPC 阻塞 0.1s 后返回 0；在阻塞期间调用 stop
+        client = MagicMock()
+
+        def slow_eval(*args, **kwargs):
+            time.sleep(0.1)
+            return 0  # token 不匹配
+
+        client.eval.side_effect = slow_eval
+        callback = MagicMock()
+
+        dog = SyncWatchdog(
+            client,
+            "res-stop",
+            "tok",
+            ttl=10,
+            interval=0.02,
+            on_lost=callback,
+        )
+        dog.start()
+        time.sleep(0.05)  # 让 RPC 进入飞行
+        dog.stop(join_timeout=0.5)
+
+        # 主动 stop 时即使解析到 token 不匹配也不应回调
+        callback.assert_not_called()
+
+
+class TestSyncWatchdogOnLostCallbackException(unittest.TestCase):
+    """验证 on_lost 回调内部异常不会导致看门狗线程崩溃。"""
+
+    def test_callback_exception_swallowed(self):
+        client = MagicMock()
+        client.eval.return_value = 0  # 直接进入 lost 分支
+
+        def bad_callback(key):
+            raise RuntimeError("user bug")
+
+        dog = SyncWatchdog(
+            client,
+            "res-cbexc",
+            "tok",
+            ttl=10,
+            interval=0.02,
+            on_lost=bad_callback,
+        )
+        # 不应抛出异常
+        dog.start()
+        time.sleep(0.1)
+        dog.stop()
+
+
+class TestSyncWatchdogStartIdempotent(unittest.TestCase):
+    """验证 start 幂等：重复调用只启一个线程，stop 后可重新 start。"""
+
+    def test_repeated_start_single_thread(self):
+        client = MagicMock()
+        client.eval.return_value = 1
+        dog = SyncWatchdog(client, "res-idem", "tok", ttl=10, interval=0.05)
+        dog.start()
+        first_thread = dog._thread
+        dog.start()
+        dog.start()
+        # 重复 start 不会替换线程
+        self.assertIs(dog._thread, first_thread)
+        dog.stop()
+
+    def test_restart_after_stop(self):
+        client = MagicMock()
+        client.eval.return_value = 1
+        dog = SyncWatchdog(client, "res-restart", "tok", ttl=10, interval=0.05)
+        dog.start()
+        dog.stop()
+        # stop 后再 start 应成功
+        dog.start()
+        self.assertIsNotNone(dog._thread)
+        self.assertTrue(dog._thread.is_alive())
+        dog.stop()
+
+
+class TestAsyncWatchdogParameterValidation(unittest.TestCase):
+    """验证 AsyncWatchdog 构造参数的边界校验。"""
+
+    def test_ttl_positive(self):
+        with self.assertRaises(ValueError):
+            AsyncWatchdog(MagicMock(), "k", "t", ttl=0)
+
+    def test_interval_zero_rejected(self):
+        with self.assertRaises(ValueError):
+            AsyncWatchdog(MagicMock(), "k", "t", ttl=10, interval=0)
+
+    def test_max_renew_failures_at_least_one(self):
+        with self.assertRaises(ValueError):
+            AsyncWatchdog(MagicMock(), "k", "t", ttl=10, interval=1, max_renew_failures=0)
+
+
+class TestAsyncWatchdogConsecutiveFailures(unittest.IsolatedAsyncioTestCase):
+    """验证 AsyncWatchdog 连续 RPC 失败触发 on_lost。"""
+
+    async def test_consecutive_failures_trigger_on_lost(self):
+        async def eval_fail(*args, **kwargs):
+            raise ConnectionError("down")
+
+        client = MagicMock()
+        client.eval = MagicMock(side_effect=eval_fail)
+        callback = MagicMock()
+
+        dog = AsyncWatchdog(
+            client,
+            "res-afail",
+            "tok",
+            ttl=10,
+            interval=0.02,
+            on_lost=callback,
+            max_renew_failures=2,
+        )
+        await dog.start()
+        await asyncio.sleep(0.2)
+        await dog.stop()
+
+        callback.assert_called_once_with("res-afail")
+
+
 if __name__ == "__main__":
     unittest.main()
