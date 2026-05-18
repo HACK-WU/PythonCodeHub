@@ -84,7 +84,19 @@ key — Redis Key 声明式元数据管理模式
     原始实现源自 bk-monitor 的 alarm_backends/core/cache/key.py。
 """
 
-import typing
+from typing import Any, Protocol
+from collections.abc import Callable
+
+
+class RedisKeyClientProtocol(Protocol):
+    """RedisKey 所依赖的 Redis 客户端接口契约。
+
+    任何客户端只要实现 expire 方法，即可作为 client_factory 的返回值。
+    """
+
+    def expire(self, name: str, time: int) -> Any:
+        """设置 key 的过期时间（秒）。"""
+        ...
 
 
 class KeyPrefixManager:
@@ -138,7 +150,7 @@ class RedisKey:
         is_global: 是否全局 key。全局 key 使用 global_prefix，
             非全局 key 使用 cluster_prefix。默认 False。
         prefix_manager: 前缀管理器。为 None 时不添加前缀。
-        client_factory: Redis 客户端工厂，签名为 (backend: str) -> client。
+        client_factory: Redis 客户端工厂，签名为 (backend: str) -> RedisKeyClientProtocol。
             为 None 时 expire() 等方法不可用。
         label: key 的描述信息（可选，仅用于文档）。
         **extra: 其他自定义属性，存储为实例属性。
@@ -160,7 +172,7 @@ class RedisKey:
         backend: str | None = None,
         is_global: bool = False,
         prefix_manager: KeyPrefixManager | None = None,
-        client_factory: typing.Callable[[str], typing.Any] | None = None,
+        client_factory: Callable[[str], RedisKeyClientProtocol] | None = None,
         label: str = "",
         **extra,
     ):
@@ -178,7 +190,7 @@ class RedisKey:
             setattr(self, k, v)
 
     @property
-    def client(self):
+    def client(self) -> RedisKeyClientProtocol:
         """
         获取 Redis 客户端实例（延迟初始化）。
 
