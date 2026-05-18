@@ -27,7 +27,7 @@ key — Redis Key 声明式元数据管理模式
     - cluster_prefix：集群隔离 key 前缀
 
 用法：
-    from ab_redis.key import RedisKey, HashKey, KeyPrefixManager
+    from ab_redis.key import RedisKey, HashKey, StringKey, KeyPrefixManager
 
     # 1. 创建前缀管理器
     prefix_mgr = KeyPrefixManager(
@@ -35,8 +35,8 @@ key — Redis Key 声明式元数据管理模式
         cluster_prefix="myapp.ee.cluster1",
     )
 
-    # 2. 定义 key
-    USER_CACHE = RedisKey(
+    # 2. 声明式定义 key（推荐）
+    USER_CACHE = StringKey(
         key_tpl="cache.user.{user_id}",
         ttl=3600,
         backend="default",
@@ -54,7 +54,21 @@ key — Redis Key 声明式元数据管理模式
         prefix_manager=prefix_mgr,
     )
 
-    # 3. 使用
+    # 3. 配置驱动创建（从 YAML/JSON 等加载时使用）
+    USER_CACHE = StringKey.from_config({
+        "key_tpl": "cache.user.{user_id}",
+        "ttl": 3600,
+        "backend": "default",
+    })
+    # 或通过 key_type 自动路由
+    USER_CACHE = RedisKey.from_config({
+        "key_type": "string",
+        "key_tpl": "cache.user.{user_id}",
+        "ttl": 3600,
+        "backend": "default",
+    })
+
+    # 4. 使用
     key = USER_CACHE.get_key(user_id=123)
     # -> "myapp.ee.cache.user.123"
 
@@ -208,6 +222,52 @@ class RedisKey:
 
         return key
 
+    @classmethod
+    def from_config(cls, config: dict) -> "RedisKey":
+        """
+        配置驱动的 Key 创建（声明式风格）。
+
+        如果 config 包含 key_type 字段，则从类型注册表查找子类；
+        否则使用当前类（cls）直接构造。其余字段作为构造参数。
+
+        Args:
+            config: key 配置字典。含 key_type 时自动路由子类，
+                不含时使用调用类本身构造。
+
+        Returns:
+            对应类型的 RedisKey 实例。
+
+        Raises:
+            TypeError: key_type 不受支持。
+
+        用法：
+            # 显式指定类型（无需 key_type）
+            USER_CACHE = StringKey.from_config({
+                "key_tpl": "cache.user.{user_id}",
+                "ttl": 3600,
+                "backend": "default",
+            })
+
+            # 通过 key_type 路由
+            KEY = RedisKey.from_config({
+                "key_type": "string",
+                "key_tpl": "cache.user.{user_id}",
+                "ttl": 3600,
+                "backend": "default",
+            })
+        """
+        config = dict(config)  # 浅拷贝，避免修改原字典
+        key_type = config.pop("key_type", None)
+        if key_type is not None:
+            from ab_redis.key import _TypeRegistry
+
+            key_cls = _TypeRegistry.get(key_type)
+            if not key_cls:
+                raise TypeError(f"unsupported key type: {key_type}, supported: {_TypeRegistry.supported_types()}")
+        else:
+            key_cls = cls
+        return key_cls(**config)
+
     def expire(self, **key_kwargs) -> None:
         """
         便捷方法：设置 key 的过期时间。
@@ -275,32 +335,35 @@ class SortedSetKey(RedisKey):
     """SortedSet 数据结构的 Key 对象。"""
 
 
-# key_type → 子类映射
-_KEY_TYPE_MAP: dict[str, type[RedisKey]] = {
-    "string": StringKey,
-    "hash": HashKey,
-    "set": SetKey,
-    "list": ListKey,
-    "sorted_set": SortedSetKey,
-}
+class _TypeRegistry:
+    """Key 类型注册表，支持 from_config 类方法。"""
+
+    _map: dict[str, type[RedisKey]] = {}
+
+    @classmethod
+    def register(cls, key_type: str, key_cls: type[RedisKey]) -> None:
+        cls._map[key_type] = key_cls
+
+    @classmethod
+    def get(cls, key_type: str) -> type[RedisKey] | None:
+        return cls._map.get(key_type)
+
+    @classmethod
+    def supported_types(cls) -> list[str]:
+        return list(cls._map.keys())
 
 
-def _underscore_to_camel(name: str) -> str:
-    """
-    下划线转驼峰：sorted_set -> SortedSet
-
-    Args:
-        name: 下划线分隔的字符串。
-
-    Returns:
-        驼峰格式的字符串。
-    """
-    return "".join(word.capitalize() for word in name.split("_"))
+# 自动注册内置子类
+_TypeRegistry.register("string", StringKey)
+_TypeRegistry.register("hash", HashKey)
+_TypeRegistry.register("set", SetKey)
+_TypeRegistry.register("list", ListKey)
+_TypeRegistry.register("sorted_set", SortedSetKey)
 
 
 def register_key(config: dict) -> RedisKey:
     """
-    配置驱动的 Key 注册工厂。
+    配置驱动的 Key 注册工厂（兼容旧接口，推荐使用 RedisKey.from_config）。
 
     根据 config 中的 key_type 字段选择对应的 Key 子类，
     并用其余字段作为构造参数创建实例。
@@ -315,19 +378,5 @@ def register_key(config: dict) -> RedisKey:
 
     Raises:
         TypeError: 不支持的 key_type。
-
-    用法：
-        USER_CACHE = register_key({
-            "key_type": "string",
-            "key_tpl": "cache.user.{user_id}",
-            "ttl": 3600,
-            "backend": "default",
-            "label": "用户信息缓存",
-        })
     """
-    config = dict(config)  # 浅拷贝，避免修改原字典
-    key_type = config.pop("key_type")
-    key_cls = _KEY_TYPE_MAP.get(key_type)
-    if not key_cls:
-        raise TypeError(f"unsupported key type: {key_type}, supported: {list(_KEY_TYPE_MAP.keys())}")
-    return key_cls(**config)
+    return RedisKey.from_config(config)

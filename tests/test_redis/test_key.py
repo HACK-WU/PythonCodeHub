@@ -316,3 +316,87 @@ class TestEndToEnd:
         # 设置过期
         dim_cache.expire(strategy_id=1, item_id=2)
         mock_client.expire.assert_called_once_with("myapp.dimension.cache.1.2", 86400)
+
+
+class TestFromConfig:
+    """RedisKey.from_config 声明式配置驱动测试"""
+
+    def test_string_from_config_without_key_type(self):
+        """StringKey.from_config 无需 key_type，直接用当前类构造"""
+        key = StringKey.from_config(
+            {
+                "key_tpl": "cache.user.{user_id}",
+                "ttl": 3600,
+                "backend": "default",
+            }
+        )
+        assert isinstance(key, StringKey)
+        assert key.key_tpl == "cache.user.{user_id}"
+
+    def test_hash_from_config_without_key_type(self):
+        """HashKey.from_config 直接构造"""
+        key = HashKey.from_config(
+            {
+                "key_tpl": "cache.dim.{sid}",
+                "ttl": 1800,
+                "backend": "service",
+                "field_tpl": "{md5}",
+            }
+        )
+        assert isinstance(key, HashKey)
+        assert key.field_tpl == "{md5}"
+
+    def test_from_config_with_key_type_routing(self):
+        """RedisKey.from_config 通过 key_type 路由到子类"""
+        key = RedisKey.from_config(
+            {
+                "key_type": "hash",
+                "key_tpl": "cache.dim",
+                "ttl": 60,
+                "backend": "default",
+                "field_tpl": "{md5}",
+            }
+        )
+        assert isinstance(key, HashKey)
+
+    def test_from_config_unsupported_key_type_raises(self):
+        """不支持的 key_type 抛出 TypeError"""
+        with pytest.raises(TypeError, match="unsupported key type"):
+            RedisKey.from_config({"key_type": "unknown", "key_tpl": "test", "ttl": 60, "backend": "default"})
+
+    def test_from_config_does_not_modify_input(self):
+        """from_config 不应修改传入的 config 字典"""
+        config = {
+            "key_type": "string",
+            "key_tpl": "test",
+            "ttl": 60,
+            "backend": "default",
+        }
+        config_copy = dict(config)
+        RedisKey.from_config(config)
+        assert config == config_copy
+
+    def test_from_config_preserves_extra_config(self):
+        key = RedisKey.from_config(
+            {
+                "key_type": "string",
+                "key_tpl": "test",
+                "ttl": 60,
+                "backend": "default",
+                "label": "测试",
+                "is_global": True,
+            }
+        )
+        assert key.label == "测试"
+        assert key.is_global is True
+
+    def test_from_config_on_base_class_without_key_type(self):
+        """在基类上调用 from_config 且无 key_type 时，使用基类构造"""
+        key = RedisKey.from_config(
+            {
+                "key_tpl": "test",
+                "ttl": 60,
+                "backend": "default",
+            }
+        )
+        assert type(key) is RedisKey
