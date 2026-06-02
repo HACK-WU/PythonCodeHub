@@ -2,7 +2,7 @@
 name: code-review
 description: 针对多语言代码提交进行多维度专业 Code Review，以语义一致性为核心优先级，覆盖安全性、Bug风险、代码规范、架构设计、性能、测试覆盖七大维度。能够根据变更语言自动联想对应语言/框架的规范、版本约束与常见陷阱。触发短语包括：'review 这个提交'、'code review'、'检查这段代码'、'review diff'、'审查代码变更'，或者当用户提供 git commit hash、git diff 输出、代码变更片段并要求审查时自动触发。
 allowed-tools: 
-disable: true
+disable: false
 
 ---
 
