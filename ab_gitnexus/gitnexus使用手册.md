@@ -533,7 +533,147 @@ args = ["-y", "gitnexus@latest", "mcp"]
 }
 ```
 
-### 4.3 编辑器支持对比
+### 4.3 MCP 配置方式详解
+
+GitNexus 的 MCP 服务器支持两种主要配置方式，适用于不同的使用场景：
+
+#### 📌 方式一：HTTP 模式配置
+
+通过 HTTP 协议连接到 GitNexus 的 MCP 服务器，适用于需要远程访问或集成到已有服务的场景。
+
+**配置示例**：
+
+```json
+{
+  "mcpServers": {
+    "gitnexus": {
+      "type": "streamableHttp",
+      "url": "http://localhost:4747/api/mcp",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "timeout": 60000,
+      "disabled": false
+    }
+  }
+}
+```
+
+**适用场景**：
+- 需要远程访问 MCP 服务器
+- 集成到现有的 HTTP 服务架构中
+- 需要自定义请求头或超时设置
+- 在 Docker 或容器环境中使用
+
+**启动方式**：
+
+```bash
+# 启动 HTTP 服务器
+gitnexus serve
+
+# 服务器将监听 http://localhost:4747/api/mcp
+```
+
+#### 📌 方式二：本地命令模式配置
+
+通过本地命令直接启动 MCP 服务器，适用于本地开发环境，性能更好且配置简单。
+
+**配置示例**：
+
+```json
+{
+  "mcpServers": {
+    "gitnexus": {
+      "command": "/root/.npm/node_modules/bin/gitnexus",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**适用场景**：
+- 本地开发环境
+- 需要最佳性能（避免网络开销）
+- 不需要远程访问
+- 使用 `gitnexus setup` 自动配置的场景
+
+**启动方式**：
+
+```bash
+# 直接启动 MCP 服务器
+gitnexus mcp
+
+# 或通过 npx 启动（推荐）
+npx gitnexus@latest mcp
+```
+
+#### 🔄 两种方式对比
+
+| 特性 | HTTP 模式 | 本地命令模式 |
+|------|-----------|------------|
+| **网络要求** | 需要网络访问 | 无网络要求 |
+| **性能** | 有网络开销 | 本地执行，性能最佳 |
+| **配置复杂度** | 需要配置 URL、headers 等 | 只需配置 command 和 args |
+| **远程访问** | 支持 | 不支持 |
+| **适用环境** | 远程服务器、容器 | 本地开发 |
+| **默认端口** | `4747` | N/A |
+| **超时设置** | 可自定义 | 由编辑器控制 |
+
+#### 💡 选择建议
+
+1. **本地开发**：推荐使用本地命令模式（方式二），配置简单且性能最佳
+2. **远程/容器环境**：使用 HTTP 模式（方式一），便于集成和访问
+3. **自动配置**：使用 `gitnexus setup` 会自动配置本地命令模式
+4. **自定义需求**：如需自定义超时、headers 等，使用 HTTP 模式
+
+#### ⚙️ 高级配置示例
+
+**自定义超时和重试**（HTTP 模式）：
+
+```json
+{
+  "mcpServers": {
+    "gitnexus": {
+      "type": "streamableHttp",
+      "url": "http://localhost:4747/api/mcp",
+      "headers": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer your-token"
+      },
+      "timeout": 120000,
+      "disabled": false
+    }
+  }
+}
+```
+
+**使用全局安装的 GitNexus**（本地命令模式）：
+
+```json
+{
+  "mcpServers": {
+    "gitnexus": {
+      "command": "gitnexus",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**使用 npx 启动**（本地命令模式）：
+
+```json
+{
+  "mcpServers": {
+    "gitnexus": {
+      "command": "npx",
+      "args": ["-y", "gitnexus@latest", "mcp"]
+    }
+  }
+}
+```
+
+### 4.4 编辑器支持对比
 
 | 编辑器             | MCP | 技能 (Skills) |         Hooks（自动增强）        | 支持级别     |
 | --------------- | :-: | :---------: | :------------------------: | -------- |
@@ -546,7 +686,7 @@ args = ["-y", "gitnexus@latest", "mcp"]
 
 > 🏆 Claude Code 获得最深集成：MCP 工具 + 代理技能 + PreToolUse Hooks（用图谱上下文增强搜索）+ PostToolUse Hooks（提交后自动检测过期索引并提示重新索引）。
 
-### 4.4 MCP 资源列表
+### 4.5 MCP 资源列表
 
 AI 代理可以读取以下资源获取即时上下文：
 
@@ -560,7 +700,7 @@ AI 代理可以读取以下资源获取即时上下文：
 | `gitnexus://repo/{name}/process/{name}` | 完整执行流追踪含步骤                 |
 | `gitnexus://repo/{name}/schema`         | 图谱 Schema（编写 Cypher 查询时参考） |
 
-### 4.5 MCP 提示词模板
+### 4.6 MCP 提示词模板
 
 | 提示词             | 功能                        |
 | --------------- | ------------------------- |
