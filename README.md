@@ -1,4 +1,4 @@
-# PythonCodeHub 
+# PythonCodeHub
 
 PythonCodeHub 是一个收集日常开发中可复用Python代码片段的仓库。无论您是需要快速解决特定问题，还是寻找代码灵感，这个库都能为您提供帮助。
 
@@ -84,5 +84,38 @@ docs: 更新 README 文档
 **允许的类型**：`feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`, `perf`, `ci`, `build`
 
 ------
+
+## 推荐阅读
+
+| 项目 | Stars | 简介 |
+|------|-------|------|
+| [HACK-WU/skills](https://github.com/HACK-WU/skills) | - | 面向软件工程全流程的 AI Agent 技能集，覆盖需求挖掘→技术设计→代码评审的完整链路，含 30+ 个可复用 Skill |
+| [TheAlgorithms/Python](https://github.com/TheAlgorithms/Python) | 222k | 所有算法都用 Python 实现，涵盖数据结构、排序搜索、机器学习、密码学、图像处理等数十个领域 |
+| [geekcomputers/Python](https://github.com/geekcomputers/Python) | 35.1k | 实用 Python 小脚本合集，包含文件批处理、下载器、网页爬虫、游戏等，适合初学者入门 |
+
+这些仓库与 PythonCodeHub 互补：当我们需要特定算法实现或完整项目参考时，它们是极好的学习资源。
+
+**快速安装**
+
+```bash
+# 一键安装
+curl -fsSL https://raw.githubusercontent.com/HACK-WU/skills/master/scripts/skill-install.sh | \
+  bash -s -- --skills -t /path/to/your-project
+```
+
+参数说明
+
+| 参数 | 作用 |
+|------|------|
+| `--skills` | 安装 AI Skill 定义文件（与 `--rules` 互斥） |
+| `--rules` | 安装 AI 规则文件（与 `--skills` 互斥） |
+
+目标目录（三选一，优先级从高到低）：
+
+| 方式 | 示例 |
+|------|------|
+| `-t` 直接指定（支持多个） | `-t ~/projects/app -t ~/projects/api` |
+| `--file` 配置文件 | `--file ~/my-targets.txt`（每行一个目录，`#` 注释） |
+| 不指定，读默认配置 | `--skills` → `~/.skill-targets`，`--rules` → `~/.rule-targets` |
 
 **Happy Coding!** 让我们一起构建一个强大的Python代码资源库！
