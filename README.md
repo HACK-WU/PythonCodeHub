@@ -90,8 +90,8 @@ docs: 更新 README 文档
 | 项目 | Stars | 简介 |
 |------|-------|------|
 | [HACK-WU/skills](https://github.com/HACK-WU/skills) | - | 面向软件工程全流程的 AI Agent 技能集，覆盖需求挖掘→技术设计→代码评审的完整链路，含 30+ 个可复用 Skill |
-| [TheAlgorithms/Python](https://github.com/TheAlgorithms/Python) | 222k | 所有算法都用 Python 实现，涵盖数据结构、排序搜索、机器学习、密码学、图像处理等数十个领域 |
-| [geekcomputers/Python](https://github.com/geekcomputers/Python) | 35.1k | 实用 Python 小脚本合集，包含文件批处理、下载器、网页爬虫、游戏等，适合初学者入门 |
+| [TheAlgorithms/Python](https://github.com/TheAlgorithms/Python) ⭐ | 222k | 所有算法都用 Python 实现 — [📖 中文分类索引](references/algorithms-index-cn.md) |
+| [geekcomputers/Python](https://github.com/geekcomputers/Python) ⭐ | 35.1k | 实用 Python 小脚本合集 — [📖 中文分类索引](references/geekcomputers-index-cn.md) |
 
 这些仓库与 PythonCodeHub 互补：当我们需要特定算法实现或完整项目参考时，它们是极好的学习资源。
 
