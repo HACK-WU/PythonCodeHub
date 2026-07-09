@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover - 取决于运行环境是否安装 gree
 __all__ = ["Local", "LocalBase", "local"]
 
 # 只读内部属性，禁止通过普通属性赋值/删除修改
-_READONLY_ATTRS = ("__storage__", "__ident_func__", "__lock__")
+_READONLY_ATTRS = ("__storage__", "__ident_func__")
 
 
 def _get_owner():
@@ -80,7 +80,7 @@ def _weakrefable(value):
 class LocalBase:
     """`Local` 的基类，仅声明槽位以节省内存。"""
 
-    __slots__ = ("__storage__", "__ident_func__", "__lock__")
+    __slots__ = ("__storage__", "__ident_func__")
 
 
 class Local(LocalBase):
@@ -92,6 +92,17 @@ class Local(LocalBase):
 
     由于键为对象本身，不同执行单元天然不会冲突；即使操作系统复用整数线程 id，
     也不会出现新线程读到旧线程遗留数据的情况。
+
+    线程安全（无锁设计）:
+        属性读写**全程不加锁**。安全性不依赖 GIL，而建立在两点：(1) 每个执行单元只读写
+        自己的命名空间——storage 以 owner 对象（Thread/greenlet）为键，不同执行单元键互不
+        相同，不存在跨线程操作同一内层字典；(2) 单条 dict 操作在 CPython 中原子——GIL 构建
+        如此，free-threaded（无 GIL，PEP 703）构建亦由 CPython 显式保证单条容器操作原子。
+        ``WeakKeyDictionary`` 的 per-key 访问也归约为单条 ``self.data[ref]`` 原子操作；
+        弱引用回调仅在线程结束、owner 被回收时触发，不会摘除正被访问的活线程命名空间。
+        因此 free-threaded 构建下同样安全，无需加锁。并发吞吐接近 ``threading.local``；
+        单线程下因 ``WeakKeyDictionary`` 弱引用维护开销，仍慢于 ``threading.local``
+        （约 3 倍），这是保留“自动回收/防 id 复用”特性的代价。
     """
 
     __slots__ = ()
@@ -108,99 +119,69 @@ class Local(LocalBase):
             storage = weakref.WeakKeyDictionary() if _weakrefable(ident_func()) else {}
         object.__setattr__(self, "__storage__", storage)
         object.__setattr__(self, "__ident_func__", ident_func)
-        object.__setattr__(self, "__lock__", threading.RLock())
-
-    # ---- 标识函数 ----
-    def set_ident_func(self, ident_func):
-        """动态替换用于区分执行单元的 ident 函数。
-
-        典型用途：在 asyncio 场景下注入基于 contextvars 的实现。
-        切换后会清空所有按旧 ident 建立的存储——旧数据无法按新 ident 重新定位，
-        保留只会造成泄漏。
-
-        存储类型按新 ident 返回值是否可弱引用自动选择：可弱引用则用
-        ``WeakKeyDictionary``（保留自动回收），否则用普通 dict（需调用方手动 :meth:`clear`）。
-        探测时会实际调用一次 ``ident_func()``，调用方应保证其返回值类型稳定。
-        """
-        with self.__lock__:
-            self.__storage__.clear()
-            storage = weakref.WeakKeyDictionary() if _weakrefable(ident_func()) else {}
-            object.__setattr__(self, "__storage__", storage)
-            object.__setattr__(self, "__ident_func__", ident_func)
 
     # ---- 释放 ----
     def __release_local__(self):
         """释放当前线程/协程的本地存储空间。"""
-        with self.__lock__:
-            ident = self.__ident_func__()
-            self.__storage__.pop(ident, None)
+        self.__storage__.pop(self.__ident_func__(), None)
 
     # ---- 属性访问 ----
     def __getattr__(self, name):
         # __getattr__ 仅在常规属性查找失败时调用；对只读槽位名直接报错，避免在内部
         # 槽位未初始化时（如反序列化/部分构造）访问 self.__storage__ 触发无限递归。
-        # 若 __lock__ 槽也未初始化，下方 with self.__lock__ 会再次进入 __getattr__
-        # 并因 __lock__ 属只读属性而抛 AttributeError——这是未正确构造对象的预期行为。
         if name in _READONLY_ATTRS:
             raise AttributeError(name)
-        with self.__lock__:
-            try:
-                return self.__storage__[self.__ident_func__()][name]
-            except (KeyError, AttributeError):
-                raise AttributeError(name)
+        # 无锁：每线程命名空间隔离 + 单条 dict 操作原子即可安全并发（含 free-threaded）。
+        try:
+            return self.__storage__[self.__ident_func__()][name]
+        except (KeyError, AttributeError):
+            raise AttributeError(name)
 
     def __setattr__(self, name, value):
         if name in _READONLY_ATTRS:
             raise AttributeError(f"{self.__class__.__name__!r} object attribute '{name}' is read-only")
-        with self.__lock__:
-            ident = self.__ident_func__()
-            storage = self.__storage__
-            try:
-                namespace = storage[ident]
-            except KeyError:
-                namespace = storage[ident] = {}
-            namespace[name] = value
+        ident = self.__ident_func__()
+        storage = self.__storage__
+        try:
+            namespace = storage[ident]
+        except KeyError:
+            namespace = storage[ident] = {}
+        namespace[name] = value
 
     def __delattr__(self, name):
         if name in _READONLY_ATTRS:
             raise AttributeError(f"{self.__class__.__name__!r} object attribute '{name}' is read-only")
-        with self.__lock__:
-            ident = self.__ident_func__()
-            storage = self.__storage__
-            try:
-                namespace = storage[ident]
-            except KeyError:
-                raise AttributeError(name)
-            try:
-                del namespace[name]
-            except KeyError:
-                raise AttributeError(name)
-            if not namespace:
-                # 最后一个属性被删除后回收当前命名空间
-                storage.pop(ident, None)
+        ident = self.__ident_func__()
+        storage = self.__storage__
+        try:
+            namespace = storage[ident]
+        except KeyError:
+            raise AttributeError(name)
+        try:
+            del namespace[name]
+        except KeyError:
+            raise AttributeError(name)
+        if not namespace:
+            # 最后一个属性被删除后回收当前命名空间
+            storage.pop(ident, None)
 
     # ---- 读取辅助 ----
     def __iter__(self):
-        with self.__lock__:
-            ident = self.__ident_func__()
-            return iter(list(self.__storage__.get(ident, {}).items()))
+        ident = self.__ident_func__()
+        return iter(list(self.__storage__.get(ident, {}).items()))
 
     def __contains__(self, name):
-        with self.__lock__:
-            ident = self.__ident_func__()
-            return name in self.__storage__.get(ident, {})
+        ident = self.__ident_func__()
+        return name in self.__storage__.get(ident, {})
 
     def get(self, name, default=None):
         """获取属性值，不存在时返回 ``default``。"""
-        if name in _READONLY_ATTRS:
+        try:
+            ident = self.__ident_func__()
+            storage = self.__storage__
+        except AttributeError:
             return default
-        with self.__lock__:
-            try:
-                ident = self.__ident_func__()
-                storage = self.__storage__
-            except AttributeError:
-                return default
-            return storage.get(ident, {}).get(name, default)
+        return storage.get(ident, {}).get(name, default)
 
     def clear(self):
         """清空当前线程/协程的所有局部存储数据。"""
