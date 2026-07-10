@@ -218,7 +218,8 @@ class RWLock:
     并发行为：
     - 同一实例可重入读锁（计数）
     - 不同实例的读锁可共存
-    - 写锁完全独占；本实例不支持写锁重入（重复 acquire_write 会抛 RuntimeError）
+    - 写锁完全独占；不支持同一线程写锁重入（同线程重复 acquire_write 会抛 RuntimeError）；
+      多线程共享同一实例时，非持有者线程的 acquire_write 视为正常竞争，等待持有者释放
     - 持有写锁时不能再 acquire_read（应使用 downgrade_to_read 显式降级）
     - 持有读锁时不能 acquire_write（应使用 try_upgrade_to_write 显式升级）
     - 升级需确保当前只有自己一个读者，否则需等待或放弃
@@ -267,12 +268,9 @@ class RWLock:
         self._read_count: int = 0
         # 本地是否持有写锁
         self._holds_write: bool = False
-
-    def _ensure_token_locked(self) -> str:
-        """在已持 _lock 的前提下，首次加锁时生成 token；其余场景复用现有 token。"""
-        if self._token is None:
-            self._token = uuid.uuid4().hex
-        return self._token
+        # 写锁持有者线程标识：用于区分“同线程重入”（应报错）与“跨线程竞争”（应等待）。
+        # 多个线程共享同一实例时，只有持有者线程能重入判定 / 释放写锁。
+        self._writer_ident: int | None = None
 
     # ─────────────────────────────────────────────────────
     # 读锁
@@ -292,33 +290,32 @@ class RWLock:
             RuntimeError: 本实例已持有写锁（应使用 downgrade_to_read 显式降级，
                           而非隐式叠加读锁，避免本地状态机失真）
         """
-        # 加锁初始化 token：首次加锁时生成，避免多轮周期复用造成本地 / Redis 状态不一致
-        with self._lock:
-            # 显式拒绝 W→R 的隐式转换：持写锁时调用 acquire_read 必然在 Redis 端
-            # 失败（state=="W"），最终只会返回 False 造成自家阻塞，应直接抛错
-            if self._holds_write:
-                raise RuntimeError(
-                    f"acquire_read called while holding write lock: {self.name!r}; use downgrade_to_read() instead"
-                )
-            if self._read_count == 0:
-                self._token = uuid.uuid4().hex
-            token = self._token
         ttl_ms = self.ttl * 1000
         deadline = time.monotonic() + wait
         while True:
-            result = _to_int(self.client.eval(_ACQUIRE_READ_LUA, 1, self.name, token, ttl_ms))
-            if result == 1:
-                with self._lock:
+            # 关键：token 决策 → eval → 计数更新 必须在同一临界区内原子完成。
+            # 若拆成多段临界区，中间夹着网络 eval，其他共享本实例的线程可能在
+            # 空档里改写 _token / _read_count，导致 "read_count>0 但 token 缺失" 的
+            # 不变量破坏。token 仅在成功时提交给 self._token，失败时不残留。
+            with self._lock:
+                # 显式拒绝 W→R 的隐式转换：持写锁时调用 acquire_read 必然在 Redis 端
+                # 失败（state=="W"），最终只会返回 False 造成自家阻塞，应直接抛错
+                if self._holds_write:
+                    raise RuntimeError(
+                        f"acquire_read called while holding write lock: {self.name!r}; use downgrade_to_read() instead"
+                    )
+                # read_count==0 时生成新 token；重入时复用现有 token（不变量保证非 None）
+                token = uuid.uuid4().hex if self._read_count == 0 else self._token
+                result = _to_int(self.client.eval(_ACQUIRE_READ_LUA, 1, self.name, token, ttl_ms))
+                if result == 1:
+                    self._token = token
                     self._read_count += 1
-                return True
-            # wait=0 时也允许循环末尾走一次 deadline 判断：保证至少尝试一次后再退出
-            if time.monotonic() >= deadline:
-                # 首次加锁就失败：Redis 端没有任何 token 记录，本地 token 也应释放以便下次重新生成
-                with self._lock:
-                    if self._read_count == 0 and not self._holds_write:
-                        self._token = None
-                return False
-            # 不允许 sleep 超过剩余 deadline，保证 wait 严格生效
+                    return True
+                # wait=0 时也允许走一次 deadline 判断：保证至少尝试一次后再退出。
+                # 失败路径未提交 token，无需清理本地状态。
+                if time.monotonic() >= deadline:
+                    return False
+            # sleep 放在锁外，避免持锁睡眠阻塞同实例其他操作；不超过剩余 deadline
             remaining = deadline - time.monotonic()
             sleep_for = min(remaining, retry_interval * (0.5 + random.random()))
             if sleep_for > 0:
@@ -336,6 +333,8 @@ class RWLock:
             RuntimeError:    本地读计数已为 0 仍调用
             AssertionError:  本地不变量被破坏（read_count>0 但 token 缺失）
         """
+        ttl_ms = self.ttl * 1000
+        # eval 与本地状态更新在同一临界区内完成，避免与并发 acquire_read 交错
         with self._lock:
             if self._read_count <= 0:
                 raise RuntimeError(f"release_read called without holding read lock: {self.name!r}")
@@ -343,9 +342,7 @@ class RWLock:
                 # 不变量：read_count > 0 时必然有 token；此处缺失意味着代码逻辑被破坏
                 raise AssertionError(f"RWLock {self.name!r} invariant broken: read_count>0 but token is None")
             token = self._token
-        ttl_ms = self.ttl * 1000
-        result = _to_int(self.client.eval(_RELEASE_READ_LUA, 1, self.name, token, ttl_ms), default=-1)
-        with self._lock:
+            result = _to_int(self.client.eval(_RELEASE_READ_LUA, 1, self.name, token, ttl_ms), default=-1)
             if result == -1:
                 # Redis 端已不存在（TTL 过期 或 被外部清理）：
                 # 强制清零本地计数与 token，避免后续调用被默默忽略
@@ -379,35 +376,38 @@ class RWLock:
             False — 被任何读 / 写锁阻塞且超时
 
         异常:
-            RuntimeError: 本实例已持有写锁（不支持写锁重入），
-                          或已持有读锁（应使用 try_upgrade_to_write 显式升级）
+            RuntimeError: 当前线程已持有本实例写锁（不支持同线程写锁重入），
+                          或本实例已持有读锁（应使用 try_upgrade_to_write 显式升级）
         """
-        with self._lock:
-            # 显式拒绝写锁重入：复用旧 token 会让 _ACQUIRE_WRITE_LUA 在 Redis 端
-            # 因 Hash 已存在而失败，最终轮询超时返回 False 形成自死锁
-            if self._holds_write:
-                raise RuntimeError(f"acquire_write called while already holding write lock: {self.name!r}")
-            # 显式拒绝 R→W 的隐式转换：持读锁时调用 acquire_write 必失败（key 已存在），
-            # 升级语义应通过 try_upgrade_to_write 表达
-            if self._read_count > 0:
-                raise RuntimeError(
-                    f"acquire_write called while holding read lock: {self.name!r}; use try_upgrade_to_write() instead"
-                )
-            self._token = uuid.uuid4().hex
-            token = self._token
         ttl_ms = self.ttl * 1000
         deadline = time.monotonic() + wait
+        me = threading.get_ident()
         while True:
-            result = _to_int(self.client.eval(_ACQUIRE_WRITE_LUA, 1, self.name, token, ttl_ms))
-            if result == 1:
-                with self._lock:
-                    self._holds_write = True
-                return True
-            if time.monotonic() >= deadline:
-                with self._lock:
-                    if self._read_count == 0 and not self._holds_write:
-                        self._token = None
-                return False
+            # token 决策 → eval → 写标记更新 原子化于同一临界区，避免并发 acquire/release
+            # 观察到 "eval 后才置 _holds_write" 的中间态。token 仅在成功时提交。
+            with self._lock:
+                if self._holds_write:
+                    # 同一线程重复获取写锁属于不支持的重入：复用旧 token 会让
+                    # _ACQUIRE_WRITE_LUA 在 Redis 端因 Hash 已存在而失败，形成自死锁
+                    if self._writer_ident == me:
+                        raise RuntimeError(f"acquire_write called while already holding write lock: {self.name!r}")
+                    # 否则是共享同一实例的另一线程持有写锁：视为正常竞争，等待其释放后重试
+                elif self._read_count > 0:
+                    # 显式拒绝 R→W 的隐式转换：持读锁时调用 acquire_write 必失败（key 已存在），
+                    # 升级语义应通过 try_upgrade_to_write 表达
+                    raise RuntimeError(
+                        f"acquire_write called while holding read lock: {self.name!r}; use try_upgrade_to_write() instead"
+                    )
+                else:
+                    token = uuid.uuid4().hex
+                    result = _to_int(self.client.eval(_ACQUIRE_WRITE_LUA, 1, self.name, token, ttl_ms))
+                    if result == 1:
+                        self._token = token
+                        self._holds_write = True
+                        self._writer_ident = me
+                        return True
+                if time.monotonic() >= deadline:
+                    return False
             remaining = deadline - time.monotonic()
             sleep_for = min(remaining, retry_interval * (0.5 + random.random()))
             if sleep_for > 0:
@@ -421,18 +421,21 @@ class RWLock:
             0 — token 不匹配（锁已被他人持有或已过期）
 
         异常:
-            RuntimeError:   本地未持写锁仍调用
+            RuntimeError:   当前线程未持写锁仍调用
             AssertionError: 本地不变量被破坏（holds_write 为 True 但 token 缺失）
         """
+        me = threading.get_ident()
+        # eval 与状态更新在同一临界区内完成，避免与并发 acquire_write 交错
         with self._lock:
-            if not self._holds_write:
+            # 仅写锁持有者线程可释放：非持有线程调用视为未持锁
+            if not self._holds_write or self._writer_ident != me:
                 raise RuntimeError(f"release_write called without holding write lock: {self.name!r}")
             if self._token is None:
                 raise AssertionError(f"RWLock {self.name!r} invariant broken: holds_write=True but token is None")
             token = self._token
-        result = _to_int(self.client.eval(_RELEASE_WRITE_LUA, 1, self.name, token))
-        with self._lock:
+            result = _to_int(self.client.eval(_RELEASE_WRITE_LUA, 1, self.name, token))
             self._holds_write = False
+            self._writer_ident = None
             # 写锁释放后若本地不再持有任何锁，清理 token 以便下次重新生成
             if self._read_count == 0:
                 self._token = None
@@ -456,22 +459,24 @@ class RWLock:
             RuntimeError:   本地未持写锁
             AssertionError: 本地不变量被破坏（holds_write 为 True 但 token 缺失）
         """
+        ttl_ms = self.ttl * 1000
+        # eval 与状态更新在同一临界区内完成，保持降级过程本地状态原子可见
         with self._lock:
             if not self._holds_write:
                 raise RuntimeError(f"downgrade_to_read called without holding write lock: {self.name!r}")
             if self._token is None:
                 raise AssertionError(f"RWLock {self.name!r} invariant broken: holds_write=True but token is None")
             token = self._token
-        ttl_ms = self.ttl * 1000
-        result = _to_int(self.client.eval(_DOWNGRADE_LUA, 1, self.name, token, ttl_ms))
-        with self._lock:
+            result = _to_int(self.client.eval(_DOWNGRADE_LUA, 1, self.name, token, ttl_ms))
             if result == 1:
                 self._holds_write = False
+                self._writer_ident = None
                 self._read_count += 1
                 return True
             # 降级失败（不应发生；除非 Redis 端状态被篡改 / TTL 过期）：
             # 本地视为已失去锁，清理 token 与状态，避免后续操作错位
             self._holds_write = False
+            self._writer_ident = None
             self._token = None
             return False
 
@@ -502,24 +507,25 @@ class RWLock:
             RuntimeError:   本地未持读锁
             AssertionError: 本地不变量被破坏（read_count>0 但 token 缺失）
         """
-        with self._lock:
-            if self._read_count <= 0:
-                raise RuntimeError(f"try_upgrade_to_write called without holding read lock: {self.name!r}")
-            if self._token is None:
-                raise AssertionError(f"RWLock {self.name!r} invariant broken: read_count>0 but token is None")
-            token = self._token
         ttl_ms = self.ttl * 1000
         deadline = time.monotonic() + wait
         while True:
-            result = _to_int(self.client.eval(_UPGRADE_LUA, 1, self.name, token, ttl_ms))
-            if result == 1:
-                # 升级成功：清零本地读计数（对应 Lua 中的 HDEL），设置写持有标记
-                with self._lock:
+            # 校验 → eval → 状态更新 原子化于同一临界区，避免升级过程中本地状态被并发改写
+            with self._lock:
+                if self._read_count <= 0:
+                    raise RuntimeError(f"try_upgrade_to_write called without holding read lock: {self.name!r}")
+                if self._token is None:
+                    raise AssertionError(f"RWLock {self.name!r} invariant broken: read_count>0 but token is None")
+                token = self._token
+                result = _to_int(self.client.eval(_UPGRADE_LUA, 1, self.name, token, ttl_ms))
+                if result == 1:
+                    # 升级成功：清零本地读计数（对应 Lua 中的 HDEL），设置写持有标记
                     self._read_count = 0
                     self._holds_write = True
-                return True
-            if time.monotonic() >= deadline:
-                return False
+                    self._writer_ident = threading.get_ident()
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
             remaining = deadline - time.monotonic()
             sleep_for = min(remaining, retry_interval * (0.5 + random.random()))
             if sleep_for > 0:

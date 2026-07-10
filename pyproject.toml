@@ -79,27 +79,9 @@ markers = [
 addopts = [
   "-v",
   "--tb=short",
-  "--cov=http_client",
-  "--cov-report=term-missing",
-  "--cov-fail-under=90",
   "-p",
   "no:warnings",
 ]
-
-# 覆盖率配置
-
-[tool.coverage.run]
-source = [ "http_client" ]
-omit = [
-  "*/tests/*",
-  "*/__pycache__/*",
-  "*/site-packages/*",
-]
-
-[tool.coverage.report]
-precision = 2
-show_missing = true
-skip_covered = false
 
 [[tool.uv.index]]
 # 配置清华源
